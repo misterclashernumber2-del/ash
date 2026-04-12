@@ -10,7 +10,7 @@ export function RoomPage() {
   }
 
   return (
-    <div className="h-screen w-full bg-[#0a0a0a] text-[#e5e5e5] font-mono flex flex-col">
+    <div className="h-screen w-full flex flex-col">
       <Room roomId={roomId} />
     </div>
   );

@@ -27,6 +27,32 @@ export function Message({ message, onViewMedia }) {
   const isImage = mimeType?.startsWith('image/') || name?.match(/\.(jpg|jpeg|png|gif|webp)$/i);
   const isVideo = mimeType?.startsWith('video/') || name?.match(/\.(mp4|webm|ogg|mov|avi|mkv)$/i);
 
+  if (type === 'system') {
+    return (
+      <div className="flex w-full justify-center my-4">
+        <span className="bg-zinc-900/60 border border-zinc-800/50 text-zinc-400 text-xs px-3 py-1.5 rounded-full">
+          {text}
+        </span>
+      </div>
+    );
+  }
+
+  const renderTextWithLinks = (text) => {
+    if (!text) return null;
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const parts = text.split(urlRegex);
+    return parts.map((part, i) => {
+      if (part.match(urlRegex)) {
+        return (
+          <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="text-emerald-400 hover:underline break-all">
+            {part}
+          </a>
+        );
+      }
+      return part;
+    });
+  };
+
   return (
     <div className={`flex w-full ${fromMe ? 'justify-end' : 'justify-start'} mb-2`}>
       <div className="flex flex-col max-w-[85%] sm:max-w-[75%]">
@@ -56,12 +82,12 @@ export function Message({ message, onViewMedia }) {
                   </div>
                 </div>
               ) : (
-                <a href={url} download={name} className="text-blue-400 underline">{name || 'Download File'}</a>
+                <a href={url} download={name} className="text-emerald-400 underline">{name || 'Download File'}</a>
               )}
-              {text && <span className="mt-1">{text}</span>}
+              {text && <span className="mt-1">{renderTextWithLinks(text)}</span>}
             </div>
           ) : (
-            text
+            renderTextWithLinks(text)
           )}
         </div>
         {timeLeft > 0 && (

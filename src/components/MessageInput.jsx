@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useLanguage } from '../lib/i18n';
 import { Send, Paperclip, X, AlertCircle } from 'lucide-react';
 
-export function MessageInput({ onSend, onSendFile, disabled }) {
+export function MessageInput({ onSend, onSendFile, disabled, draggedFile, onClearDraggedFile, onTyping }) {
   const { t } = useLanguage();
   const [text, setText] = useState('');
   const textareaRef = useRef(null);
@@ -11,13 +11,42 @@ export function MessageInput({ onSend, onSendFile, disabled }) {
   const [previewUrl, setPreviewUrl] = useState(null);
   const [qualityMode, setQualityMode] = useState('balance');
   const [error, setError] = useState('');
+  const typingTimeoutRef = useRef(null);
   const MAX_LENGTH = 2000;
   const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+
+  useEffect(() => {
+    if (draggedFile) {
+      processFile(draggedFile);
+      onClearDraggedFile?.();
+    }
+  }, [draggedFile]);
 
   const handleChange = (e) => {
     const val = e.target.value;
     if (val.length <= MAX_LENGTH) {
       setText(val);
+      if (onTyping && !disabled) {
+        onTyping(true);
+        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = setTimeout(() => onTyping(false), 2000);
+      }
+    }
+  };
+
+  const handlePaste = (e) => {
+    const items = e.clipboardData?.items;
+    if (items) {
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1 || items[i].type.indexOf('video') !== -1) {
+          const file = items[i].getAsFile();
+          if (file) {
+            e.preventDefault();
+            processFile(file);
+            break;
+          }
+        }
+      }
     }
   };
 
@@ -126,6 +155,11 @@ export function MessageInput({ onSend, onSendFile, disabled }) {
             </select>
           </div>
         )}
+        {isVideo && (
+          <div className="text-xs text-zinc-500 bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2.5">
+            {t('videoOriginalQuality')}
+          </div>
+        )}
 
         <input 
           type="text" 
@@ -178,6 +212,7 @@ export function MessageInput({ onSend, onSendFile, disabled }) {
           value={text}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           disabled={disabled}
           placeholder={disabled ? t('waitingConnection') : t('messagePlaceholder')}
           className="flex-1 bg-transparent px-2 py-2.5 text-[15px] focus:outline-none text-zinc-100 resize-none overflow-y-auto min-h-[44px] max-h-[150px] disabled:opacity-50 placeholder:text-zinc-500"

@@ -26,19 +26,66 @@ export function Room({ roomId }) {
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
   const [transfers, setTransfers] = useState({});
   const [viewMedia, setViewMedia] = useState(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [draggedFile, setDraggedFile] = useState(null);
 
   useEffect(() => {
     const onOffline = () => setIsOffline(true);
     const onOnline = () => setIsOffline(false);
     window.addEventListener('offline', onOffline);
     window.addEventListener('online', onOnline);
+    
+    const onBeforeUnload = (e) => {
+      if (messages.length > 0 || Object.keys(transfers).length > 0) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    
     return () => {
       window.removeEventListener('offline', onOffline);
       window.removeEventListener('online', onOnline);
+      window.removeEventListener('beforeunload', onBeforeUnload);
     };
-  }, []);
+  }, [messages.length, transfers]);
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    if (status === 'connected' && !isOffline) {
+      setIsDragging(true);
+    }
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (status === 'connected' && !isOffline && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      setDraggedFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  const [isPeerTyping, setIsPeerTyping] = useState(false);
+  const typingTimeoutRef = useRef(null);
 
   const handleReceiveMessage = useCallback((data) => {
+    if (data.type === 'typing') {
+      setIsPeerTyping(data.isTyping);
+      if (data.isTyping) {
+        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+        typingTimeoutRef.current = setTimeout(() => setIsPeerTyping(false), 3000);
+      }
+      return;
+    }
+    
+    if (data.type !== 'typing') {
+      setIsPeerTyping(false);
+    }
     addMessage(data, false);
   }, [addMessage]);
 
@@ -57,11 +104,23 @@ export function Room({ roomId }) {
     });
   }, []);
 
-  const { status, sendMessage, sendFile } = usePeer({
+  const { status, sendMessage, sendFile, sendTyping } = usePeer({
     roomId,
     onMessage: handleReceiveMessage,
     onTransferProgress: handleTransferProgress
   });
+
+  const prevStatusRef = useRef(status);
+  useEffect(() => {
+    if (prevStatusRef.current !== status) {
+      if (status === 'connected') {
+        addMessage({ type: 'system', text: t('peerJoined') || 'Peer joined the room', id: Date.now().toString() }, false);
+      } else if (status === 'disconnected' && prevStatusRef.current === 'connected') {
+        addMessage({ type: 'system', text: t('peerLeft') || 'Peer left the room', id: Date.now().toString() }, false);
+      }
+      prevStatusRef.current = status;
+    }
+  }, [status, addMessage, t]);
 
   const handleSend = async (text) => {
     const sentMsg = await sendMessage(text);
@@ -94,7 +153,19 @@ export function Room({ roomId }) {
   };
 
   return (
-    <div className="flex flex-col h-[100dvh] max-w-3xl mx-auto w-full bg-zinc-950 font-sans">
+    <div 
+      className="flex flex-col h-[100dvh] max-w-3xl mx-auto w-full bg-zinc-950 font-sans relative"
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {isDragging && (
+        <div className="absolute inset-0 z-50 bg-emerald-500/10 border-2 border-emerald-500 border-dashed rounded-xl flex items-center justify-center pointer-events-none">
+          <div className="bg-zinc-900 px-6 py-3 rounded-xl text-emerald-500 font-medium shadow-xl">
+            Drop file to send
+          </div>
+        </div>
+      )}
       <header className="px-4 py-3 border-b border-zinc-800/80 flex justify-between items-center bg-zinc-950/80 backdrop-blur-md z-10 sticky top-0">
         <div className="flex items-center gap-3">
           <button 
@@ -107,12 +178,14 @@ export function Room({ roomId }) {
           <div className="flex items-center gap-2.5 bg-zinc-900/50 px-3 py-1.5 rounded-full border border-zinc-800/50">
             <div className="relative flex items-center justify-center">
               <div className={`w-2 h-2 rounded-full ${status === 'connected' ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.5)]' : status === 'disconnected' ? 'bg-red-500' : 'bg-amber-500'}`} />
-              {status === 'connecting' && <div className="absolute w-2 h-2 rounded-full bg-amber-500 animate-ping opacity-75" />}
+              {(status === 'connecting' || status === 'reconnecting' || status === 'negotiating') && <div className="absolute w-2 h-2 rounded-full bg-amber-500 animate-ping opacity-75" />}
             </div>
             <span className="text-xs font-medium text-zinc-300">
               {status === 'connected' ? t('connected') : 
                status === 'waiting' ? t('waiting') : 
                status === 'connecting' ? t('connecting') : 
+               status === 'negotiating' ? 'Negotiating E2EE...' :
+               status === 'reconnecting' ? 'Reconnecting...' :
                t('disconnected')}
             </span>
           </div>
@@ -193,15 +266,30 @@ export function Room({ roomId }) {
             <span className="font-medium">
               {transfer.type === 'processing' ? t('processingFile') : 
                transfer.type === 'sending' ? t('sendingFile') : 
+               transfer.type === 'error' ? 'Transfer failed' :
                t('receivingFile')}
             </span>
-            <div className="flex-1 mx-4 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-              <div className="h-full bg-emerald-500 transition-all duration-300 ease-out" style={{ width: `${transfer.progress * 100}%` }} />
-            </div>
-            <span className="font-mono">{Math.round(transfer.progress * 100)}%</span>
+            {transfer.type !== 'error' && (
+              <div className="flex-1 mx-4 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
+                <div className="h-full bg-emerald-500 transition-all duration-300 ease-out" style={{ width: `${transfer.progress * 100}%` }} />
+              </div>
+            )}
+            <span className="font-mono">{transfer.type !== 'error' ? `${Math.round(transfer.progress * 100)}%` : '❌'}</span>
           </div>
         ))}
-        <MessageInput onSend={handleSend} onSendFile={handleSendFile} disabled={status !== 'connected' || isOffline} />
+        {isPeerTyping && (
+          <div className="text-xs text-zinc-500 italic px-4 py-1 animate-pulse">
+            {t('peerTyping') || 'Peer is typing...'}
+          </div>
+        )}
+        <MessageInput 
+          onSend={handleSend} 
+          onSendFile={handleSendFile} 
+          onTyping={sendTyping}
+          disabled={status !== 'connected' || isOffline} 
+          draggedFile={draggedFile}
+          onClearDraggedFile={() => setDraggedFile(null)}
+        />
       </div>
 
       {/* Lightbox */}

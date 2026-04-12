@@ -52,7 +52,11 @@ const translations = {
     receivingFile: "Receiving file...",
     processingFile: "Processing...",
     quality: "Quality",
-    download: "Download"
+    download: "Download",
+    videoOriginalQuality: "Video will be sent in original quality.",
+    peerJoined: "Peer joined the room",
+    peerLeft: "Peer left the room",
+    peerTyping: "Peer is typing..."
   },
   ru: {
     tagline: "Нет серверов. Нет истории. Нет следов.",
@@ -105,7 +109,11 @@ const translations = {
     receivingFile: "Получение файла...",
     processingFile: "Обработка...",
     quality: "Качество",
-    download: "Скачать"
+    download: "Скачать",
+    videoOriginalQuality: "Видео будет отправлено в оригинальном качестве.",
+    peerJoined: "Собеседник вошел в комнату",
+    peerLeft: "Собеседник покинул комнату",
+    peerTyping: "Собеседник печатает..."
   }
 };
 

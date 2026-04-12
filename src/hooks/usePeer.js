@@ -2,7 +2,15 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import Peer from 'peerjs';
 import { supabase } from '../lib/supabase';
 import { ICE_SERVERS } from '../lib/peerConfig';
-import { deriveKey, encryptPayload, decryptPayload, encryptBuffer, decryptBuffer } from '../lib/crypto';
+import { 
+  generateECDHKeyPair, 
+  exportPublicKey, 
+  deriveSharedSecret, 
+  encryptPayload, 
+  decryptPayload, 
+  encryptChunk, 
+  decryptChunk 
+} from '../lib/crypto';
 import { compressImage } from '../lib/fileUtils';
 import { nanoid } from 'nanoid';
 
@@ -23,11 +31,14 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
   const reconnectAttempts = useRef(0);
   const onMessageRef = useRef(onMessage);
   const onTransferProgressRef = useRef(onTransferProgress);
+  
+  const ecdhKeyPairRef = useRef(null);
   const cryptoKeyRef = useRef(null);
   const incomingFilesRef = useRef({});
 
   const setupConnectionRef = useRef(null);
   const handleDisconnectRef = useRef(null);
+  const reconnectTimeoutRef = useRef(null);
 
   useEffect(() => {
     onMessageRef.current = onMessage;
@@ -52,13 +63,17 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
 
     if (channelRef.current) {
       channelRef.current.unsubscribe();
+      channelRef.current = null;
     }
 
-    // Exponential backoff: 0s, 2s, 4s, 8s, 15s
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+    }
+
     const delay = reconnectAttempts.current === 1 ? 0 : Math.min(1000 * Math.pow(2, reconnectAttempts.current - 1), 15000);
 
-    setTimeout(() => {
-      if (!navigator.onLine) return; // Wait for online event
+    reconnectTimeoutRef.current = setTimeout(() => {
+      if (!navigator.onLine) return;
 
       const newChannel = supabase.channel(`room:${roomId}`);
       channelRef.current = newChannel;
@@ -71,12 +86,6 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
             const conn = peerRef.current.connect(payload.peerId, { reliable: true });
             setupConnectionRef.current(conn);
           }
-          
-          setTimeout(() => {
-            if (statusRef.current === 'connecting') {
-              handleDisconnectRef.current();
-            }
-          }, 30000); // 30s timeout for 2G networks
         }
       }).subscribe(async (subStatus) => {
         if (subStatus === 'SUBSCRIBED') {
@@ -95,16 +104,29 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
     let heartbeatInterval;
     let lastPong = Date.now();
 
-    conn.on('open', () => {
-      setStatus('connected');
+    conn.on('open', async () => {
+      setStatus('negotiating'); // New status for ECDH
       reconnectAttempts.current = 0;
-      channelRef.current?.unsubscribe();
+      if (channelRef.current) {
+        channelRef.current.unsubscribe();
+        channelRef.current = null;
+      }
       lastPong = Date.now();
 
-      // Heartbeat to keep NAT bindings alive on mobile/2G
+      // Send ECDH public key
+      try {
+        const pubKeyBytes = await exportPublicKey(ecdhKeyPairRef.current);
+        const payload = new Uint8Array(1 + pubKeyBytes.byteLength);
+        payload[0] = 2; // Type 2: ECDH Public Key
+        payload.set(pubKeyBytes, 1);
+        conn.send(payload);
+      } catch (err) {
+        console.error('Failed to export/send public key', err);
+      }
+
       heartbeatInterval = setInterval(() => {
         if (conn.open) {
-          conn.send({ __type: 'ping' });
+          conn.send(new Uint8Array([3])); // Type 3: Ping
           if (Date.now() - lastPong > 15000) {
             console.warn('P2P connection dead (ping timeout)');
             conn.close();
@@ -114,97 +136,116 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
     });
 
     conn.on('data', async (data) => {
-      if (data && data.__type === 'ping') {
-        conn.send({ __type: 'pong' });
-        return;
-      }
-      if (data && data.__type === 'pong') {
-        lastPong = Date.now();
-        return;
-      }
-      
-      if (cryptoKeyRef.current) {
-        try {
-          if (data instanceof ArrayBuffer || data instanceof Uint8Array) {
-            const buffer = new Uint8Array(data);
-            const type = buffer[0];
-            
-            if (type === 0) {
-              // JSON message
+      if (data instanceof ArrayBuffer || data instanceof Uint8Array) {
+        const buffer = new Uint8Array(data);
+        const type = buffer[0];
+        
+        if (type === 3) { // Ping
+          conn.send(new Uint8Array([4])); // Pong
+          return;
+        }
+        if (type === 4) { // Pong
+          lastPong = Date.now();
+          return;
+        }
+        
+        if (type === 2) { // ECDH Public Key
+          try {
+            const remotePubKeyBytes = buffer.slice(1);
+            const sharedSecret = await deriveSharedSecret(ecdhKeyPairRef.current.privateKey, remotePubKeyBytes);
+            cryptoKeyRef.current = sharedSecret;
+            setStatus('connected');
+          } catch (err) {
+            console.error('Failed to derive shared secret', err);
+          }
+          return;
+        }
+
+        if (cryptoKeyRef.current) {
+          try {
+            if (type === 0) { // JSON message
               const encryptedPayload = buffer.slice(1);
               const decryptedStr = await decryptPayload(cryptoKeyRef.current, encryptedPayload);
               const msg = JSON.parse(decryptedStr);
               
               if (msg.type === 'file-start') {
                 incomingFilesRef.current[msg.id] = {
-                  chunks: new Array(msg.totalChunks),
+                  chunks: {}, // Use object/map for sparse chunks
                   receivedChunks: 0,
                   metadata: msg
                 };
               } else if (msg.type === 'file-end') {
                 const fileData = incomingFilesRef.current[msg.id];
                 if (fileData) {
+                  if (fileData.receivedChunks !== fileData.metadata.totalChunks) {
+                    console.error('Missing chunks, transfer failed');
+                    delete incomingFilesRef.current[msg.id];
+                    if (onTransferProgressRef.current) {
+                      onTransferProgressRef.current(msg.id, 1, 'error');
+                    }
+                    return;
+                  }
+
                   if (onTransferProgressRef.current) {
                     onTransferProgressRef.current(msg.id, 1, 'processing');
                   }
-                  // Yield to allow UI to render processing state
                   await new Promise(r => setTimeout(r, 50));
 
-                  const totalLength = fileData.chunks.reduce((acc, chunk) => acc + chunk.length, 0);
-                  const encryptedFile = new Uint8Array(totalLength);
-                  let offset = 0;
-                  for (const chunk of fileData.chunks) {
-                    encryptedFile.set(chunk, offset);
-                    offset += chunk.length;
+                  const chunksArray = [];
+                  for (let i = 0; i < fileData.metadata.totalChunks; i++) {
+                    chunksArray.push(fileData.chunks[i]);
                   }
                   
-                  try {
-                    const decryptedBuffer = await decryptBuffer(cryptoKeyRef.current, encryptedFile);
-                    const blob = new Blob([decryptedBuffer], { type: fileData.metadata.mimeType });
-                    const url = URL.createObjectURL(blob);
-                    
-                    if (onMessageRef.current) {
-                      onMessageRef.current({
-                        id: msg.id,
-                        type: 'file',
-                        url,
-                        mimeType: fileData.metadata.mimeType,
-                        name: fileData.metadata.name,
-                        text: fileData.metadata.caption,
-                        ts: Date.now()
-                      });
-                    }
-                  } catch (err) {
-                    console.error('File decryption failed', err);
+                  const blob = new Blob(chunksArray, { type: fileData.metadata.mimeType });
+                  const url = URL.createObjectURL(blob);
+                  
+                  if (onMessageRef.current) {
+                    onMessageRef.current({
+                      id: msg.id,
+                      type: 'file',
+                      url,
+                      mimeType: fileData.metadata.mimeType,
+                      name: fileData.metadata.name,
+                      text: fileData.metadata.caption,
+                      ts: Date.now()
+                    });
                   }
                   delete incomingFilesRef.current[msg.id];
                   if (onTransferProgressRef.current) {
                     onTransferProgressRef.current(msg.id, 1, 'receiving');
                   }
                 }
+              } else if (msg.type === 'typing') {
+                if (onMessageRef.current) onMessageRef.current(msg);
               } else {
                 if (onMessageRef.current) onMessageRef.current(msg);
               }
-            } else if (type === 1) {
-              // File chunk
+            } else if (type === 1) { // File chunk
               const idBytes = buffer.slice(1, 22);
               const fileId = new TextDecoder().decode(idBytes).trim();
               const index = new DataView(buffer.buffer, buffer.byteOffset + 22, 4).getUint32(0, true);
-              const chunkData = buffer.slice(26);
+              const encryptedChunk = buffer.slice(26);
               
               const fileData = incomingFilesRef.current[fileId];
-              if (fileData) {
-                fileData.chunks[index] = chunkData;
-                fileData.receivedChunks++;
-                
-                if (onTransferProgressRef.current) {
-                  onTransferProgressRef.current(fileId, fileData.receivedChunks / fileData.metadata.totalChunks, 'receiving');
+              if (fileData && index < fileData.metadata.totalChunks) {
+                try {
+                  const decryptedChunk = await decryptChunk(cryptoKeyRef.current, encryptedChunk);
+                  if (!fileData.chunks[index]) {
+                    fileData.chunks[index] = decryptedChunk;
+                    fileData.receivedChunks++;
+                    
+                    if (onTransferProgressRef.current) {
+                      onTransferProgressRef.current(fileId, fileData.receivedChunks / fileData.metadata.totalChunks, 'receiving');
+                    }
+                  }
+                } catch (err) {
+                  console.error('Failed to decrypt chunk', err);
                 }
               }
             }
+          } catch (err) {
+            console.error('Data processing error:', err);
           }
-        } catch (err) {
-          console.error('Data processing error:', err);
         }
       }
     });
@@ -235,65 +276,69 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
   useEffect(() => {
     if (!roomId) return;
 
-    // Derive E2EE key asynchronously
-    deriveKey(roomId)
-      .then(key => {
-        cryptoKeyRef.current = key;
-      })
-      .catch(err => console.error("Key derivation failed", err));
+    let mounted = true;
 
-    const peerId = `${roomId}-${Math.random().toString(36).slice(2, 7)}`;
-    localIdRef.current = peerId;
-    const peer = new Peer(peerId, { config: ICE_SERVERS });
-    peerRef.current = peer;
+    const init = async () => {
+      try {
+        const keyPair = await generateECDHKeyPair();
+        if (!mounted) return;
+        ecdhKeyPairRef.current = keyPair;
 
-    const channel = supabase.channel(`room:${roomId}`);
-    channelRef.current = channel;
+        const peerId = `${roomId}-${nanoid(7)}`;
+        localIdRef.current = peerId;
+        const peer = new Peer(peerId, { config: ICE_SERVERS });
+        peerRef.current = peer;
 
-    peer.on('open', (id) => {
-      channel
-        .on('broadcast', { event: 'announce' }, ({ payload }) => {
-          if (payload.peerId !== id && (!connRef.current || !connRef.current.open)) {
-            setRemoteId(payload.peerId);
-            setStatus('connecting');
-            if (id < payload.peerId) {
-              const conn = peer.connect(payload.peerId, { reliable: true });
-              setupConnectionRef.current(conn);
-            }
-            
-            setTimeout(() => {
-              if (statusRef.current === 'connecting') {
-                handleDisconnectRef.current();
+        const channel = supabase.channel(`room:${roomId}`);
+        channelRef.current = channel;
+
+        peer.on('open', (id) => {
+          channel
+            .on('broadcast', { event: 'announce' }, ({ payload }) => {
+              if (payload.peerId !== id && (!connRef.current || !connRef.current.open)) {
+                setRemoteId(payload.peerId);
+                setStatus('connecting');
+                if (id < payload.peerId) {
+                  const conn = peer.connect(payload.peerId, { reliable: true });
+                  setupConnectionRef.current(conn);
+                }
               }
-            }, 30000); // 30s timeout for 2G networks
-          }
-        })
-        .subscribe(async (subStatus) => {
-          if (subStatus === 'SUBSCRIBED') {
-            channel.send({
-              type: 'broadcast',
-              event: 'announce',
-              payload: { peerId: id },
+            })
+            .subscribe(async (subStatus) => {
+              if (subStatus === 'SUBSCRIBED') {
+                channel.send({
+                  type: 'broadcast',
+                  event: 'announce',
+                  payload: { peerId: id },
+                });
+              }
             });
+        });
+
+        peer.on('connection', (conn) => {
+          if (remotePeerIdRef.current && localIdRef.current < remotePeerIdRef.current) {
+            conn.close();
+            return;
+          }
+          if (!connRef.current || !connRef.current.open) {
+            setStatus('connecting');
+            setRemoteId(conn.peer);
+            setupConnectionRef.current(conn);
+          } else {
+            conn.close();
           }
         });
-    });
 
-    peer.on('connection', (conn) => {
-      if (remotePeerIdRef.current && localIdRef.current < remotePeerIdRef.current) {
-        conn.close();
-        return;
+      } catch (err) {
+        console.error("Init failed", err);
       }
-      if (!connRef.current || !connRef.current.open) {
-        setStatus('connecting');
-        setRemoteId(conn.peer);
-        setupConnectionRef.current(conn);
-      } else {
-        conn.close();
-      }
-    });
+    };
+
+    init();
 
     return () => {
+      mounted = false;
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       connRef.current?.close();
       peerRef.current?.destroy();
       channelRef.current?.unsubscribe();
@@ -318,16 +363,31 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
     return null;
   }, []);
 
+  const sendTyping = useCallback(async (isTyping) => {
+    if (connRef.current && statusRef.current === 'connected' && cryptoKeyRef.current) {
+      try {
+        const msg = { type: 'typing', isTyping };
+        const encryptedPayload = await encryptPayload(cryptoKeyRef.current, JSON.stringify(msg));
+        const payloadWithType = new Uint8Array(1 + encryptedPayload.byteLength);
+        payloadWithType[0] = 0;
+        payloadWithType.set(encryptedPayload, 1);
+        connRef.current.send(payloadWithType);
+      } catch (err) {
+        // Ignore typing errors
+      }
+    }
+  }, []);
+
   const sendFile = useCallback(async (file, qualityMode = 'original', caption = '') => {
     if (!connRef.current || statusRef.current !== 'connected' || !cryptoKeyRef.current) return null;
     
+    let fileId;
     try {
-      const fileId = nanoid();
+      fileId = nanoid();
       if (onTransferProgressRef.current) {
         onTransferProgressRef.current(fileId, 0, 'processing');
       }
 
-      // Yield to allow UI to render processing state
       await new Promise(r => setTimeout(r, 50));
 
       let processedFile = file;
@@ -336,15 +396,11 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
         processedFile = await compressImage(file, qualityMode);
       }
       
-      const buffer = await processedFile.arrayBuffer();
-      const encryptedPayload = await encryptBuffer(cryptoKeyRef.current, buffer);
+      const CHUNK_SIZE = 64 * 1024; // 64KB chunks before encryption
+      const MAX_BUFFER = 1024 * 1024; // 1MB
+      const totalChunks = Math.ceil(processedFile.size / CHUNK_SIZE);
       
-      // Reduce chunk size to 16KB to prevent WebRTC message size limits from dropping connection
-      const CHUNK_SIZE = 16 * 1024;
-      const MAX_BUFFER = 256 * 1024;
-      const totalChunks = Math.ceil(encryptedPayload.byteLength / CHUNK_SIZE);
-      
-      const startMsg = { type: 'file-start', id: fileId, name: file.name, size: encryptedPayload.byteLength, totalChunks, mimeType: processedFile.type, caption };
+      const startMsg = { type: 'file-start', id: fileId, name: file.name, size: processedFile.size, totalChunks, mimeType: processedFile.type, caption };
       const encStart = await encryptPayload(cryptoKeyRef.current, JSON.stringify(startMsg));
       
       const startPayload = new Uint8Array(1 + encStart.byteLength);
@@ -355,25 +411,37 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
       const idBytes = new TextEncoder().encode(fileId.padEnd(21, ' '));
       
       for (let i = 0; i < totalChunks; i++) {
+        if (statusRef.current !== 'connected') {
+          throw new Error('Connection lost during transfer');
+        }
+        
         const dataChannel = connRef.current.dataChannel;
         if (dataChannel) {
+          let waitCount = 0;
           while (dataChannel.bufferedAmount > MAX_BUFFER) {
+            if (statusRef.current !== 'connected') throw new Error('Connection lost');
             await new Promise(r => setTimeout(r, 50));
+            waitCount++;
+            if (waitCount > 600) { // 30 seconds timeout
+              throw new Error('Transfer timeout');
+            }
           }
         } else {
-          // Fallback if dataChannel is not exposed
           if (i % 16 === 0) await new Promise(r => setTimeout(r, 10));
         }
         
-        const chunk = encryptedPayload.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+        const chunkBlob = processedFile.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+        const chunkBuffer = await chunkBlob.arrayBuffer();
+        const encryptedChunk = await encryptChunk(cryptoKeyRef.current, chunkBuffer);
+        
         const header = new Uint8Array(1 + 21 + 4);
         header[0] = 1;
         header.set(idBytes, 1);
         new DataView(header.buffer).setUint32(22, i, true);
         
-        const chunkPayload = new Uint8Array(header.length + chunk.byteLength);
+        const chunkPayload = new Uint8Array(header.length + encryptedChunk.byteLength);
         chunkPayload.set(header, 0);
-        chunkPayload.set(chunk, header.length);
+        chunkPayload.set(encryptedChunk, header.length);
         
         connRef.current.send(chunkPayload);
         
@@ -400,6 +468,9 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
       };
     } catch (err) {
       console.error('File send error:', err);
+      if (fileId && onTransferProgressRef.current) {
+        onTransferProgressRef.current(fileId, 1, 'error');
+      }
       return null;
     }
   }, []);
@@ -411,5 +482,5 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
     }
   }, []);
 
-  return { status, sendMessage, sendFile, manualConnect };
+  return { status, sendMessage, sendFile, sendTyping, manualConnect };
 }

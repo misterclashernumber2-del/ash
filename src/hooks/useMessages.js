@@ -10,14 +10,21 @@ export function useMessages(ttlSeconds = 300, maxMessages = 0) {
 
     const interval = setInterval(() => {
       const now = Date.now();
-      setMessages((prev) => 
-        prev
+      setMessages((prev) => {
+        const expired = prev.filter((msg) => now > msg.expiresAt);
+        expired.forEach(msg => {
+          if (msg.url && msg.url.startsWith('blob:')) {
+            URL.revokeObjectURL(msg.url);
+          }
+        });
+        
+        return prev
           .filter((msg) => now <= msg.expiresAt)
           .map((msg) => ({
             ...msg,
             timeLeft: Math.max(0, Math.floor((msg.expiresAt - now) / 1000)),
-          }))
-      );
+          }));
+      });
     }, 1000);
 
     return () => clearInterval(interval);
@@ -39,6 +46,20 @@ export function useMessages(ttlSeconds = 300, maxMessages = 0) {
       document.title = `(${unreadCount}) Ash`;
     }
   }, [unreadCount]);
+
+  useEffect(() => {
+    return () => {
+      // Cleanup all blob URLs on unmount
+      setMessages(prev => {
+        prev.forEach(msg => {
+          if (msg.url && msg.url.startsWith('blob:')) {
+            URL.revokeObjectURL(msg.url);
+          }
+        });
+        return [];
+      });
+    };
+  }, []);
 
   const addMessage = useCallback((rawMsg, fromMe = false) => {
     const now = Date.now();
@@ -74,7 +95,15 @@ export function useMessages(ttlSeconds = 300, maxMessages = 0) {
 
   const clearExpired = useCallback(() => {
     const now = Date.now();
-    setMessages((prev) => prev.filter((msg) => now <= msg.expiresAt));
+    setMessages((prev) => {
+      const expired = prev.filter((msg) => now > msg.expiresAt);
+      expired.forEach(msg => {
+        if (msg.url && msg.url.startsWith('blob:')) {
+          URL.revokeObjectURL(msg.url);
+        }
+      });
+      return prev.filter((msg) => now <= msg.expiresAt);
+    });
   }, []);
 
   return { messages, addMessage, clearExpired };
