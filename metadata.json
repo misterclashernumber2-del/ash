@@ -1,0 +1,5 @@
+{
+  "name": "Ephemeral P2P Messenger",
+  "description": "A secure, ephemeral P2P messenger using WebRTC and Supabase Realtime. Messages auto-delete after 5 minutes.",
+  "requestFramePermissions": []
+}
