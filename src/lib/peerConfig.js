@@ -1,10 +1,15 @@
+const turnUrl = import.meta.env.VITE_METERED_URL || 'turn:relay.metered.ca:80';
+const turnUsername = import.meta.env.VITE_METERED_USERNAME;
+const turnCredential = import.meta.env.VITE_METERED_CREDENTIAL;
+
 export const ICE_SERVERS = {
   iceServers: [
     { urls: 'stun:stun.cloudflare.com:3478' },
-    {
-      urls: 'turn:your.metered.ca:80',
-      username: 'YOUR_METERED_USERNAME',
-      credential: 'YOUR_METERED_CREDENTIAL',
-    },
+    { urls: 'stun:stun.l.google.com:19302' },
+    ...(turnUsername && turnCredential ? [{
+      urls: turnUrl,
+      username: turnUsername,
+      credential: turnCredential,
+    }] : []),
   ],
 };

@@ -1,14 +1,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import { nanoid } from 'nanoid';
 
-const EXPIRY_TIME_MS = 5 * 60 * 1000; // 5 minutes
-const MAX_MESSAGES = 200;
-
-export function useMessages() {
+export function useMessages(ttlSeconds = 300, maxMessages = 0) {
   const [messages, setMessages] = useState([]);
   const [unreadCount, setUnreadCount] = useState(0);
 
   useEffect(() => {
+    if (ttlSeconds <= 0) return; // 0 means unlimited time
+
     const interval = setInterval(() => {
       const now = Date.now();
       setMessages((prev) => 
@@ -22,7 +21,7 @@ export function useMessages() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, []);
+  }, [ttlSeconds]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -43,19 +42,25 @@ export function useMessages() {
 
   const addMessage = useCallback((rawMsg, fromMe = false) => {
     const now = Date.now();
+    const expiryTimeMs = ttlSeconds * 1000;
+    
     const message = {
       id: rawMsg.id || nanoid(),
       text: rawMsg.text,
+      type: rawMsg.type || 'text',
+      url: rawMsg.url,
+      mimeType: rawMsg.mimeType,
+      name: rawMsg.name,
       fromMe,
       timestamp: rawMsg.ts || now,
-      expiresAt: (rawMsg.ts || now) + EXPIRY_TIME_MS,
-      timeLeft: Math.floor(EXPIRY_TIME_MS / 1000),
+      expiresAt: ttlSeconds > 0 ? (rawMsg.ts || now) + expiryTimeMs : Infinity,
+      timeLeft: ttlSeconds,
     };
 
     setMessages((prev) => {
       const newMessages = [...prev, message];
-      if (newMessages.length > MAX_MESSAGES) {
-        return newMessages.slice(newMessages.length - MAX_MESSAGES);
+      if (maxMessages > 0 && newMessages.length > maxMessages) {
+        return newMessages.slice(newMessages.length - maxMessages);
       }
       return newMessages;
     });
@@ -65,7 +70,7 @@ export function useMessages() {
     }
 
     return message;
-  }, []);
+  }, [ttlSeconds, maxMessages]);
 
   const clearExpired = useCallback(() => {
     const now = Date.now();
