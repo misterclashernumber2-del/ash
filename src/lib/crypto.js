@@ -68,10 +68,13 @@ export async function decryptPayload(key, payload) {
   return dec.decode(decrypted);
 }
 
-export async function encryptChunk(key, buffer) {
+export async function encryptChunk(key, buffer, aad) {
   const iv = window.crypto.getRandomValues(new Uint8Array(12));
+  const options = { name: 'AES-GCM', iv: iv };
+  if (aad) options.additionalData = aad;
+  
   const ciphertext = await window.crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: iv },
+    options,
     key,
     buffer
   );
@@ -81,11 +84,14 @@ export async function encryptChunk(key, buffer) {
   return payload;
 }
 
-export async function decryptChunk(key, payload) {
+export async function decryptChunk(key, payload, aad) {
   const iv = payload.slice(0, 12);
   const ciphertext = payload.slice(12);
+  const options = { name: 'AES-GCM', iv: iv };
+  if (aad) options.additionalData = aad;
+  
   const decrypted = await window.crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv: iv },
+    options,
     key,
     ciphertext
   );

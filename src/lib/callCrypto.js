@@ -13,9 +13,8 @@ export async function deriveCallKey(ecdhSharedKey) {
   );
 }
 
-let encryptFrameCounter = 0;
-
 export function createEncryptTransform(callKey, isInitiator) {
+  let encryptFrameCounter = 0;
   return new TransformStream({
     async transform(encodedFrame, controller) {
       const frameCounter = encryptFrameCounter++;

@@ -3,7 +3,7 @@ import React, { useEffect, useRef } from 'react';
 export function CallUI({ callState, callType, isMuted, isVideoOff, quality,
                          localStream, remoteStream, insertableStreamsSupported,
                          onAccept, onReject, onEnd, onMute, onVideoToggle,
-                         CALL_STATES }) {
+                         CALL_STATES, fingerprint }) {
   const localVideoRef = useRef(null);
   const remoteVideoRef = useRef(null);
   
@@ -93,8 +93,11 @@ export function CallUI({ callState, callType, isMuted, isVideoOff, quality,
         </div>
 
         {/* E2EE индикатор */}
-        <div className="text-center text-xs text-zinc-600 py-1">
-          {insertableStreamsSupported ? '🔒 E2E encrypted' : '🔐 DTLS encrypted'}
+        <div className="text-center text-xs text-zinc-600 py-1 flex flex-col items-center gap-1">
+          <span>{insertableStreamsSupported ? '🔒 E2E encrypted' : '🔐 DTLS encrypted'}</span>
+          {fingerprint && (
+            <span className="font-mono text-[10px] opacity-50">FP: {fingerprint.substring(0, 16)}...</span>
+          )}
         </div>
 
         {/* Контролы */}

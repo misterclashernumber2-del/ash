@@ -45,7 +45,7 @@ export function MessageInput({ onSend, onSendFile, disabled, draggedFile, onClea
     const items = e.clipboardData?.items;
     if (items) {
       for (let i = 0; i < items.length; i++) {
-        if (items[i].type.indexOf('image') !== -1 || items[i].type.indexOf('video') !== -1) {
+        if (items[i].kind === 'file') {
           const file = items[i].getAsFile();
           if (file) {
             e.preventDefault();

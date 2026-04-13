@@ -2,6 +2,7 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { deriveCallKey, createEncryptTransform, createDecryptTransform } from '../lib/callCrypto';
 import { ICE_SERVERS } from '../lib/peerConfig';
 import { encryptPayload } from '../lib/crypto';
+import { toast } from 'sonner';
 
 const CALL_STATES = {
   IDLE: 'idle',
@@ -42,6 +43,13 @@ function optimizeSDP(sdp, quality = 'low') {
 
 export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
   const [callState, setCallState] = useState(CALL_STATES.IDLE);
+  const callStateRef = useRef(CALL_STATES.IDLE);
+  
+  const updateCallState = useCallback((newState) => {
+    setCallState(newState);
+    callStateRef.current = newState;
+  }, []);
+
   const [callType, setCallType] = useState('audio');
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
@@ -55,6 +63,7 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
   const callTimeoutRef = useRef(null);
   const iceQueueRef = useRef([]);
   const isInitiatorRef = useRef(false);
+  const mountedRef = useRef(true);
   
   const insertableStreamsSupported = typeof RTCRtpSender !== 'undefined' && 
     'createEncodedStreams' in RTCRtpSender.prototype;
@@ -93,11 +102,13 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
     iceQueueRef.current = [];
     isInitiatorRef.current = false;
     
-    setCallState(CALL_STATES.IDLE);
-    setQuality('good');
-    setIsMuted(false);
-    setIsVideoOff(false);
-  }, []);
+    if (mountedRef.current) {
+      updateCallState(CALL_STATES.IDLE);
+      setQuality('good');
+      setIsMuted(false);
+      setIsVideoOff(false);
+    }
+  }, [updateCallState]);
 
   const createPeerConnection = useCallback(async (type, isInitiator) => {
     await initCallKey();
@@ -167,7 +178,18 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
       console.error('Failed to get media devices', err);
       sendCallSignal({ type: 'call-reject' });
       cleanupCall();
-      onSystemMessage?.('Microphone/Camera access denied or timeout');
+      
+      let errorMsg = 'Microphone/Camera access denied';
+      if (err.name === 'NotReadableError' || err.name === 'TrackStartError') {
+        errorMsg = 'Camera/Microphone is already in use by another application';
+      } else if (err.message === 'Media access timeout') {
+        errorMsg = 'Media access timed out';
+      } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+        errorMsg = 'Requested device not found';
+      }
+      
+      toast.error(errorMsg);
+      onSystemMessage?.(errorMsg);
       return null;
     }
 
@@ -196,14 +218,24 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
       }
     };
 
-    pc.onconnectionstatechange = () => {
+    pc.onconnectionstatechange = async () => {
       if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
         clearTimeout(callTimeoutRef.current);
-        setCallState(CALL_STATES.CONNECTED);
+        updateCallState(CALL_STATES.CONNECTED);
         startQualityMonitor(pc);
       } else if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
         if (pc.connectionState === 'failed') {
-          pc.restartIce();
+          if (isInitiatorRef.current) {
+            try {
+              const offer = await pc.createOffer({ iceRestart: true });
+              offer.sdp = optimizeSDP(offer.sdp);
+              await pc.setLocalDescription(offer);
+              await sendCallSignal({ type: 'call-sdp-offer', sdp: offer.sdp, restart: true });
+            } catch (e) {
+              console.error('ICE restart failed', e);
+              cleanupCall();
+            }
+          }
         } else {
           cleanupCall();
         }
@@ -211,7 +243,7 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
     };
 
     return pc;
-  }, [initCallKey, insertableStreamsSupported, cleanupCall, sendCallSignal, onSystemMessage]);
+  }, [initCallKey, insertableStreamsSupported, cleanupCall, sendCallSignal, onSystemMessage, updateCallState]);
 
   const startQualityMonitor = useCallback((pc) => {
     qualityIntervalRef.current = setInterval(async () => {
@@ -250,8 +282,8 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
   }, []);
 
   const startCall = useCallback(async (type = 'audio') => {
-    if (callState !== CALL_STATES.IDLE) return;
-    setCallState(CALL_STATES.CALLING);
+    if (callStateRef.current !== CALL_STATES.IDLE) return;
+    updateCallState(CALL_STATES.CALLING);
     setCallType(type);
     
     await sendCallSignal({ type: 'call-offer', callType: type });
@@ -261,11 +293,11 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
       cleanupCall();
       onSystemMessage?.('No answer');
     }, 30000);
-  }, [callState, sendCallSignal, cleanupCall, onSystemMessage]);
+  }, [sendCallSignal, cleanupCall, onSystemMessage, updateCallState]);
 
   const acceptCall = useCallback(async (incomingCallType) => {
     clearTimeout(callTimeoutRef.current);
-    setCallState(CALL_STATES.CONNECTING);
+    updateCallState(CALL_STATES.CONNECTING);
     
     callTimeoutRef.current = setTimeout(() => {
       if (peerConnectionRef.current?.connectionState !== 'connected' && peerConnectionRef.current?.connectionState !== 'completed') {
@@ -280,7 +312,7 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
     if (pc) {
       await sendCallSignal({ type: 'call-accept' });
     }
-  }, [createPeerConnection, sendCallSignal, cleanupCall, onSystemMessage]);
+  }, [createPeerConnection, sendCallSignal, cleanupCall, onSystemMessage, updateCallState]);
 
   const rejectCall = useCallback(async () => {
     await sendCallSignal({ type: 'call-reject' });
@@ -297,10 +329,22 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
 
     switch (msg.type) {
       case 'call-offer':
-        if (callState === CALL_STATES.IDLE) {
-          setCallState(CALL_STATES.INCOMING);
+        if (callStateRef.current === CALL_STATES.IDLE) {
+          updateCallState(CALL_STATES.INCOMING);
           setCallType(msg.callType);
           clearTimeout(callTimeoutRef.current);
+          
+          if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && document.hidden) {
+            try {
+              new Notification('Incoming call', { 
+                body: `Incoming ${msg.callType} call`, 
+                icon: '/icon.png' 
+              });
+            } catch (e) {
+              console.warn('Notification failed', e);
+            }
+          }
+          
           callTimeoutRef.current = setTimeout(() => {
             sendCallSignal({ type: 'call-missed' });
             cleanupCall();
@@ -310,7 +354,7 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
 
       case 'call-accept': {
         clearTimeout(callTimeoutRef.current);
-        setCallState(CALL_STATES.CONNECTING);
+        updateCallState(CALL_STATES.CONNECTING);
         
         callTimeoutRef.current = setTimeout(() => {
           if (peerConnectionRef.current?.connectionState !== 'connected' && peerConnectionRef.current?.connectionState !== 'completed') {
@@ -333,7 +377,7 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
 
       case 'call-sdp-offer': {
         const pc = peerConnectionRef.current;
-        if (!pc) break;
+        if (!pc || typeof msg.sdp !== 'string' || !msg.sdp.includes('v=0')) break;
         await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
         
         iceQueueRef.current.forEach(c => pc.addIceCandidate(c).catch(() => {}));
@@ -348,7 +392,7 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
 
       case 'call-sdp-answer': {
         const pc = peerConnectionRef.current;
-        if (pc) {
+        if (pc && typeof msg.sdp === 'string' && msg.sdp.includes('v=0')) {
           await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
           iceQueueRef.current.forEach(c => pc.addIceCandidate(c).catch(() => {}));
           iceQueueRef.current = [];
@@ -380,7 +424,7 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
         return false;
     }
     return true;
-  }, [callState, callType, createPeerConnection, sendCallSignal, cleanupCall, onSystemMessage]);
+  }, [callType, createPeerConnection, sendCallSignal, cleanupCall, onSystemMessage, updateCallState]);
 
   const toggleMute = useCallback(() => {
     localStreamRef.current?.getAudioTracks().forEach(t => {
@@ -396,7 +440,13 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
     setIsVideoOff(v => !v);
   }, []);
 
-  useEffect(() => () => cleanupCall(), [cleanupCall]);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cleanupCall();
+    };
+  }, [cleanupCall]);
 
   return {
     callState, callType, isMuted, isVideoOff, quality,

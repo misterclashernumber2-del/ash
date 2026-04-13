@@ -7,7 +7,9 @@ import { Message } from './Message';
 import { MessageInput } from './MessageInput';
 import { CallUI } from './CallUI';
 import { useLanguage } from '../lib/i18n';
-import { ArrowLeft, Copy, ShieldAlert, WifiOff, X, Download, Phone, Video } from 'lucide-react';
+import { ArrowLeft, Copy, ShieldAlert, WifiOff, X, Download, Phone, Video, QrCode } from 'lucide-react';
+import { QRCodeSVG } from 'qrcode.react';
+import { toast } from 'sonner';
 
 export function Room({ roomId }) {
   const navigate = useNavigate();
@@ -186,9 +188,11 @@ export function Room({ roomId }) {
     try {
       await navigator.clipboard.writeText(shareLink);
       setCopied(true);
+      toast.success(t('copied') || 'Link copied to clipboard');
       setTimeout(() => setCopied(false), 2000);
     } catch (err) {
       console.error('Failed to copy', err);
+      toast.error('Failed to copy link');
     }
   };
 
@@ -265,6 +269,7 @@ export function Room({ roomId }) {
         onMute={toggleMute} 
         onVideoToggle={toggleVideo}
         CALL_STATES={CALL_STATES}
+        fingerprint={fingerprint}
       />
 
       {isOffline && (
@@ -280,6 +285,11 @@ export function Room({ roomId }) {
             <p className="text-sm font-medium text-zinc-300">{t('shareToConnect')}</p>
             <p className="text-xs text-zinc-500 max-w-xs mx-auto leading-relaxed">{t('oneLinkWarning')}</p>
           </div>
+          
+          <div className="bg-white p-3 rounded-xl shadow-lg">
+            <QRCodeSVG value={shareLink} size={120} level="M" includeMargin={false} />
+          </div>
+
           <div className="flex items-center gap-2 w-full max-w-md bg-zinc-950 p-1.5 rounded-2xl border border-zinc-800">
             <input 
               type="text" 

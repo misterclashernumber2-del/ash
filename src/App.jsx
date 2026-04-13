@@ -9,6 +9,7 @@ import { Home } from './pages/Home';
 import { RoomPage } from './pages/RoomPage';
 import { TestPage } from './pages/TestPage';
 import { LanguageProvider } from './lib/i18n';
+import { Toaster } from 'sonner';
 
 export default function App() {
   return (
@@ -21,6 +22,7 @@ export default function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
+      <Toaster theme="dark" position="top-center" />
     </LanguageProvider>
   );
 }

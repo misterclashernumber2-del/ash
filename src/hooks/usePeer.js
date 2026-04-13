@@ -14,6 +14,7 @@ import {
 } from '../lib/crypto';
 import { compressImage } from '../lib/fileUtils';
 import { nanoid } from 'nanoid';
+import { toast } from 'sonner';
 
 export function usePeer({ roomId, onMessage, onTransferProgress, onCallSignal }) {
   const [status, setStatusState] = useState('waiting');
@@ -84,7 +85,8 @@ export function usePeer({ roomId, onMessage, onTransferProgress, onCallSignal })
       setFingerprint(null);
     }).catch(err => console.error('Failed to generate new ECDH key pair', err));
 
-    const delay = reconnectAttempts.current === 1 ? 0 : Math.min(1000 * Math.pow(2, reconnectAttempts.current - 1), 15000);
+    const jitter = Math.random() * 1000;
+    const delay = reconnectAttempts.current === 1 ? jitter : Math.min(1000 * Math.pow(2, reconnectAttempts.current - 1), 15000) + jitter;
 
     reconnectTimeoutRef.current = setTimeout(() => {
       if (!navigator.onLine) return;
@@ -244,6 +246,7 @@ export function usePeer({ roomId, onMessage, onTransferProgress, onCallSignal })
                     if (onTransferProgressRef.current) {
                       onTransferProgressRef.current(msg.id, 1, 'error');
                     }
+                    toast.error(`Transfer failed: ${fileData.metadata.name}`);
                     return;
                   }
 
@@ -282,6 +285,7 @@ export function usePeer({ roomId, onMessage, onTransferProgress, onCallSignal })
                 if (onTransferProgressRef.current) {
                   onTransferProgressRef.current(msg.id, 1, 'error');
                 }
+                toast.error('File transfer cancelled by peer');
               } else {
                 if (onMessageRef.current) onMessageRef.current(msg);
               }
@@ -291,10 +295,12 @@ export function usePeer({ roomId, onMessage, onTransferProgress, onCallSignal })
               const index = new DataView(buffer.buffer, buffer.byteOffset + 22, 4).getUint32(0, true);
               const encryptedChunk = buffer.slice(26);
               
+              const aad = buffer.slice(1, 26); // fileId + index
+              
               const fileData = incomingFilesRef.current[fileId];
               if (fileData && index < fileData.metadata.totalChunks) {
                 try {
-                  const decryptedChunk = await decryptChunk(cryptoKeyRef.current, encryptedChunk);
+                  const decryptedChunk = await decryptChunk(cryptoKeyRef.current, encryptedChunk, aad);
                   if (!fileData.chunks[index]) {
                     fileData.chunks[index] = decryptedChunk;
                     fileData.receivedChunks++;
@@ -562,6 +568,7 @@ export function usePeer({ roomId, onMessage, onTransferProgress, onCallSignal })
       if (fileId && onTransferProgressRef.current) {
         onTransferProgressRef.current(fileId, 1, 'error');
       }
+      toast.error(err.message === 'Transfer cancelled' ? 'Transfer cancelled' : 'Failed to send file');
       return null;
     }
   }, []);
