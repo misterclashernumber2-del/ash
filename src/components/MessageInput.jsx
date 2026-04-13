@@ -12,6 +12,7 @@ export function MessageInput({ onSend, onSendFile, disabled, draggedFile, onClea
   const [qualityMode, setQualityMode] = useState('balance');
   const [error, setError] = useState('');
   const typingTimeoutRef = useRef(null);
+  const isTypingRef = useRef(false);
   const MAX_LENGTH = 2000;
   const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 
@@ -27,9 +28,15 @@ export function MessageInput({ onSend, onSendFile, disabled, draggedFile, onClea
     if (val.length <= MAX_LENGTH) {
       setText(val);
       if (onTyping && !disabled) {
-        onTyping(true);
+        if (!isTypingRef.current) {
+          onTyping(true);
+          isTypingRef.current = true;
+        }
         if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-        typingTimeoutRef.current = setTimeout(() => onTyping(false), 2000);
+        typingTimeoutRef.current = setTimeout(() => {
+          onTyping(false);
+          isTypingRef.current = false;
+        }, 2000);
       }
     }
   };

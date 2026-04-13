@@ -9,12 +9,13 @@ import {
   encryptPayload, 
   decryptPayload, 
   encryptChunk, 
-  decryptChunk 
+  decryptChunk,
+  generateFingerprint
 } from '../lib/crypto';
 import { compressImage } from '../lib/fileUtils';
 import { nanoid } from 'nanoid';
 
-export function usePeer({ roomId, onMessage, onTransferProgress }) {
+export function usePeer({ roomId, onMessage, onTransferProgress, onCallSignal }) {
   const [status, setStatusState] = useState('waiting');
   const statusRef = useRef('waiting');
   const setStatus = (s) => {
@@ -31,7 +32,9 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
   const reconnectAttempts = useRef(0);
   const onMessageRef = useRef(onMessage);
   const onTransferProgressRef = useRef(onTransferProgress);
+  const onCallSignalRef = useRef(onCallSignal);
   
+  const [fingerprint, setFingerprint] = useState(null);
   const ecdhKeyPairRef = useRef(null);
   const cryptoKeyRef = useRef(null);
   const incomingFilesRef = useRef({});
@@ -47,6 +50,10 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
   useEffect(() => {
     onTransferProgressRef.current = onTransferProgress;
   }, [onTransferProgress]);
+
+  useEffect(() => {
+    onCallSignalRef.current = onCallSignal;
+  }, [onCallSignal]);
 
   const setRemoteId = (id) => {
     remotePeerIdRef.current = id;
@@ -69,6 +76,13 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
     }
+
+    // Generate new ECDH key pair on reconnect for forward secrecy
+    generateECDHKeyPair().then(keyPair => {
+      ecdhKeyPairRef.current = keyPair;
+      cryptoKeyRef.current = null;
+      setFingerprint(null);
+    }).catch(err => console.error('Failed to generate new ECDH key pair', err));
 
     const delay = reconnectAttempts.current === 1 ? 0 : Math.min(1000 * Math.pow(2, reconnectAttempts.current - 1), 15000);
 
@@ -104,9 +118,13 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
     let heartbeatInterval;
     let lastPong = Date.now();
 
-    conn.on('open', async () => {
+    const handleOpen = async () => {
       setStatus('negotiating'); // New status for ECDH
       reconnectAttempts.current = 0;
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
       if (channelRef.current) {
         channelRef.current.unsubscribe();
         channelRef.current = null;
@@ -133,7 +151,13 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
           }
         }
       }, 5000);
-    });
+    };
+
+    if (conn.open) {
+      handleOpen();
+    } else {
+      conn.on('open', handleOpen);
+    }
 
     conn.on('data', async (data) => {
       if (data instanceof ArrayBuffer || data instanceof Uint8Array) {
@@ -154,9 +178,23 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
             const remotePubKeyBytes = buffer.slice(1);
             const sharedSecret = await deriveSharedSecret(ecdhKeyPairRef.current.privateKey, remotePubKeyBytes);
             cryptoKeyRef.current = sharedSecret;
+            
+            const localPubKeyBytes = await exportPublicKey(ecdhKeyPairRef.current);
+            const fp = await generateFingerprint(localPubKeyBytes, remotePubKeyBytes);
+            setFingerprint(fp);
+            
             setStatus('connected');
+            // Send ACK to confirm key exchange
+            conn.send(new Uint8Array([5])); // Type 5: ECDH ACK
           } catch (err) {
             console.error('Failed to derive shared secret', err);
+          }
+          return;
+        }
+
+        if (type === 5) { // ECDH ACK
+          if (cryptoKeyRef.current) {
+            setStatus('connected');
           }
           return;
         }
@@ -168,6 +206,11 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
               const decryptedStr = await decryptPayload(cryptoKeyRef.current, encryptedPayload);
               const msg = JSON.parse(decryptedStr);
               
+              if (msg.__call) {
+                if (onCallSignalRef.current) onCallSignalRef.current(msg);
+                return;
+              }
+
               if (msg.type === 'file-start') {
                 incomingFilesRef.current[msg.id] = {
                   chunks: {}, // Use object/map for sparse chunks
@@ -215,8 +258,12 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
                     onTransferProgressRef.current(msg.id, 1, 'receiving');
                   }
                 }
-              } else if (msg.type === 'typing') {
-                if (onMessageRef.current) onMessageRef.current(msg);
+              } else if (msg.type === 'file-cancel') {
+                cancelTransferRef.current[msg.id] = true;
+                delete incomingFilesRef.current[msg.id];
+                if (onTransferProgressRef.current) {
+                  onTransferProgressRef.current(msg.id, 1, 'error');
+                }
               } else {
                 if (onMessageRef.current) onMessageRef.current(msg);
               }
@@ -378,6 +425,24 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
     }
   }, []);
 
+  const cancelTransferRef = useRef({});
+
+  const cancelTransfer = useCallback(async (id) => {
+    cancelTransferRef.current[id] = true;
+    if (connRef.current && statusRef.current === 'connected' && cryptoKeyRef.current) {
+      try {
+        const cancelMsg = { type: 'file-cancel', id };
+        const encCancel = await encryptPayload(cryptoKeyRef.current, JSON.stringify(cancelMsg));
+        const cancelPayload = new Uint8Array(1 + encCancel.byteLength);
+        cancelPayload[0] = 0;
+        cancelPayload.set(encCancel, 1);
+        connRef.current.send(cancelPayload);
+      } catch (err) {
+        console.error('Failed to send cancel message', err);
+      }
+    }
+  }, []);
+
   const sendFile = useCallback(async (file, qualityMode = 'original', caption = '') => {
     if (!connRef.current || statusRef.current !== 'connected' || !cryptoKeyRef.current) return null;
     
@@ -413,6 +478,10 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
       for (let i = 0; i < totalChunks; i++) {
         if (statusRef.current !== 'connected') {
           throw new Error('Connection lost during transfer');
+        }
+        if (cancelTransferRef.current[fileId]) {
+          delete cancelTransferRef.current[fileId];
+          throw new Error('Transfer cancelled');
         }
         
         const dataChannel = connRef.current.dataChannel;
@@ -482,5 +551,5 @@ export function usePeer({ roomId, onMessage, onTransferProgress }) {
     }
   }, []);
 
-  return { status, sendMessage, sendFile, sendTyping, manualConnect };
+  return { status, fingerprint, sendMessage, sendFile, sendTyping, cancelTransfer, manualConnect, connRef, cryptoKeyRef };
 }

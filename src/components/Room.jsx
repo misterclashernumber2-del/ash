@@ -2,10 +2,12 @@ import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom';
 import { usePeer } from '../hooks/usePeer';
 import { useMessages } from '../hooks/useMessages';
+import { useCall } from '../hooks/useCall';
 import { Message } from './Message';
 import { MessageInput } from './MessageInput';
+import { CallUI } from './CallUI';
 import { useLanguage } from '../lib/i18n';
-import { ArrowLeft, Copy, ShieldAlert, WifiOff, X, Download } from 'lucide-react';
+import { ArrowLeft, Copy, ShieldAlert, WifiOff, X, Download, Phone, Video } from 'lucide-react';
 
 export function Room({ roomId }) {
   const navigate = useNavigate();
@@ -15,8 +17,8 @@ export function Room({ roomId }) {
   const { ttl, maxMsgs } = useMemo(() => {
     const parts = roomId.split('_');
     return {
-      ttl: parts.length === 3 ? parseInt(parts[1], 10) : 300,
-      maxMsgs: parts.length === 3 ? parseInt(parts[2], 10) : 0
+      ttl: parts.length === 3 ? (parseInt(parts[1], 10) || 300) : 300,
+      maxMsgs: parts.length === 3 ? (parseInt(parts[2], 10) || 0) : 0
     };
   }, [roomId]);
 
@@ -104,11 +106,42 @@ export function Room({ roomId }) {
     });
   }, []);
 
-  const { status, sendMessage, sendFile, sendTyping } = usePeer({
+  const callSignalHandlerRef = useRef(null);
+
+  const handleCallSignalProxy = useCallback((msg) => {
+    if (callSignalHandlerRef.current) {
+      return callSignalHandlerRef.current(msg);
+    }
+    return false;
+  }, []);
+
+  const { status, fingerprint, sendMessage, sendFile, sendTyping, cancelTransfer, connRef, cryptoKeyRef } = usePeer({
     roomId,
     onMessage: handleReceiveMessage,
-    onTransferProgress: handleTransferProgress
+    onTransferProgress: handleTransferProgress,
+    onCallSignal: handleCallSignalProxy
   });
+
+  const handleSystemMessage = useCallback((text) => {
+    addMessage({ type: 'system', text, ts: Date.now() });
+  }, [addMessage]);
+
+  const callProps = useCall({
+    connRef,
+    cryptoKeyRef,
+    onSystemMessage: handleSystemMessage
+  });
+
+  useEffect(() => {
+    callSignalHandlerRef.current = callProps.handleCallSignal;
+  }, [callProps.handleCallSignal]);
+
+  const {
+    callState, callType, isMuted, isVideoOff, quality,
+    localStream, remoteStream, insertableStreamsSupported,
+    startCall, acceptCall, rejectCall, endCall,
+    toggleMute, toggleVideo, CALL_STATES
+  } = callProps;
 
   const prevStatusRef = useRef(status);
   useEffect(() => {
@@ -189,8 +222,43 @@ export function Room({ roomId }) {
                t('disconnected')}
             </span>
           </div>
+          {fingerprint && status === 'connected' && (
+            <div className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900/30 rounded-full border border-zinc-800/30" title="E2EE Fingerprint (Safety Number)">
+              <ShieldAlert className="w-3 h-3 text-emerald-500" />
+              <span className="text-[10px] font-mono text-zinc-500 tracking-wider">{fingerprint}</span>
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={() => startCall('audio')}
+            disabled={status !== 'connected'}
+            className="p-2 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 rounded-full transition-all disabled:opacity-30">
+            <Phone className="w-5 h-5" />
+          </button>
+          <button onClick={() => startCall('video')}
+            disabled={status !== 'connected'}
+            className="p-2 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-900 rounded-full transition-all disabled:opacity-30">
+            <Video className="w-5 h-5" />
+          </button>
         </div>
       </header>
+
+      <CallUI 
+        callState={callState} 
+        callType={callType} 
+        isMuted={isMuted} 
+        isVideoOff={isVideoOff} 
+        quality={quality}
+        localStream={localStream} 
+        remoteStream={remoteStream} 
+        insertableStreamsSupported={insertableStreamsSupported}
+        onAccept={acceptCall} 
+        onReject={rejectCall} 
+        onEnd={endCall} 
+        onMute={toggleMute} 
+        onVideoToggle={toggleVideo}
+        CALL_STATES={CALL_STATES}
+      />
 
       {isOffline && (
         <div className="bg-amber-500/10 text-amber-500 text-xs font-medium px-4 py-2.5 flex items-center justify-center gap-2 border-b border-amber-500/20">
@@ -274,7 +342,18 @@ export function Room({ roomId }) {
                 <div className="h-full bg-emerald-500 transition-all duration-300 ease-out" style={{ width: `${transfer.progress * 100}%` }} />
               </div>
             )}
-            <span className="font-mono">{transfer.type !== 'error' ? `${Math.round(transfer.progress * 100)}%` : '❌'}</span>
+            <div className="flex items-center gap-2">
+              <span className="font-mono">{transfer.type !== 'error' ? `${Math.round(transfer.progress * 100)}%` : '❌'}</span>
+              {transfer.type !== 'error' && transfer.type !== 'processing' && (
+                <button 
+                  onClick={() => cancelTransfer(id)}
+                  className="p-1 hover:bg-zinc-800 rounded-full text-zinc-500 hover:text-red-400 transition-colors"
+                  title="Cancel transfer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
           </div>
         ))}
         {isPeerTyping && (

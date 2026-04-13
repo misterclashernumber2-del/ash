@@ -64,6 +64,7 @@ export function useMessages(ttlSeconds = 300, maxMessages = 0) {
   const addMessage = useCallback((rawMsg, fromMe = false) => {
     const now = Date.now();
     const expiryTimeMs = ttlSeconds * 1000;
+    const isSystem = rawMsg.type === 'system';
     
     const message = {
       id: rawMsg.id || nanoid(),
@@ -74,19 +75,29 @@ export function useMessages(ttlSeconds = 300, maxMessages = 0) {
       name: rawMsg.name,
       fromMe,
       timestamp: rawMsg.ts || now,
-      expiresAt: ttlSeconds > 0 ? (rawMsg.ts || now) + expiryTimeMs : Infinity,
-      timeLeft: ttlSeconds,
+      expiresAt: (isSystem || ttlSeconds <= 0) ? Infinity : (rawMsg.ts || now) + expiryTimeMs,
+      timeLeft: isSystem ? 0 : ttlSeconds,
     };
 
     setMessages((prev) => {
       const newMessages = [...prev, message];
-      if (maxMessages > 0 && newMessages.length > maxMessages) {
-        return newMessages.slice(newMessages.length - maxMessages);
+      if (maxMessages > 0) {
+        while (newMessages.filter(m => m.type !== 'system').length > maxMessages) {
+          const idx = newMessages.findIndex(m => m.type !== 'system');
+          if (idx !== -1) {
+            const removed = newMessages.splice(idx, 1)[0];
+            if (removed.url && removed.url.startsWith('blob:')) {
+              URL.revokeObjectURL(removed.url);
+            }
+          } else {
+            break;
+          }
+        }
       }
       return newMessages;
     });
 
-    if (!fromMe && document.hidden) {
+    if (!fromMe && document.hidden && !isSystem) {
       setUnreadCount((prev) => prev + 1);
     }
 

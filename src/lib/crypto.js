@@ -91,3 +91,33 @@ export async function decryptChunk(key, payload) {
   );
   return decrypted;
 }
+
+export async function generateFingerprint(localPubKeyBytes, remotePubKeyBytes) {
+  const combined = new Uint8Array(localPubKeyBytes.length + remotePubKeyBytes.length);
+  
+  let localFirst = true;
+  for (let i = 0; i < localPubKeyBytes.length; i++) {
+    if (localPubKeyBytes[i] !== remotePubKeyBytes[i]) {
+      localFirst = localPubKeyBytes[i] < remotePubKeyBytes[i];
+      break;
+    }
+  }
+
+  if (localFirst) {
+    combined.set(localPubKeyBytes, 0);
+    combined.set(remotePubKeyBytes, localPubKeyBytes.length);
+  } else {
+    combined.set(remotePubKeyBytes, 0);
+    combined.set(localPubKeyBytes, remotePubKeyBytes.length);
+  }
+
+  const hashBuffer = await window.crypto.subtle.digest('SHA-256', combined);
+  const view = new DataView(hashBuffer);
+  
+  // Generate 3 groups of 5 digits
+  const num1 = view.getUint32(0) % 100000;
+  const num2 = view.getUint32(4) % 100000;
+  const num3 = view.getUint32(8) % 100000;
+  
+  return `${String(num1).padStart(5, '0')} ${String(num2).padStart(5, '0')} ${String(num3).padStart(5, '0')}`;
+}
