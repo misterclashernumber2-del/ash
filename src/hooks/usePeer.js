@@ -116,9 +116,19 @@ export function usePeer({ roomId, onMessage, onTransferProgress, onCallSignal })
   setupConnectionRef.current = (conn) => {
     connRef.current = conn;
     let heartbeatInterval;
+    let pubKeyInterval;
     let lastPong = Date.now();
 
+    const connectionTimeout = setTimeout(() => {
+      if (!conn.open) {
+        console.warn('Connection timeout, forcing reconnect');
+        conn.close();
+        handleDisconnectRef.current();
+      }
+    }, 15000);
+
     const handleOpen = async () => {
+      clearTimeout(connectionTimeout);
       setStatus('negotiating'); // New status for ECDH
       reconnectAttempts.current = 0;
       if (reconnectTimeoutRef.current) {
@@ -131,16 +141,21 @@ export function usePeer({ roomId, onMessage, onTransferProgress, onCallSignal })
       }
       lastPong = Date.now();
 
-      // Send ECDH public key
-      try {
-        const pubKeyBytes = await exportPublicKey(ecdhKeyPairRef.current);
-        const payload = new Uint8Array(1 + pubKeyBytes.byteLength);
-        payload[0] = 2; // Type 2: ECDH Public Key
-        payload.set(pubKeyBytes, 1);
-        conn.send(payload);
-      } catch (err) {
-        console.error('Failed to export/send public key', err);
-      }
+      const sendPubKey = async () => {
+        if (statusRef.current !== 'negotiating' || !conn.open) return;
+        try {
+          const pubKeyBytes = await exportPublicKey(ecdhKeyPairRef.current);
+          const payload = new Uint8Array(1 + pubKeyBytes.byteLength);
+          payload[0] = 2; // Type 2: ECDH Public Key
+          payload.set(pubKeyBytes, 1);
+          conn.send(payload);
+        } catch (err) {
+          console.error('Failed to export/send public key', err);
+        }
+      };
+
+      sendPubKey();
+      pubKeyInterval = setInterval(sendPubKey, 2000);
 
       heartbeatInterval = setInterval(() => {
         if (conn.open) {
@@ -184,6 +199,8 @@ export function usePeer({ roomId, onMessage, onTransferProgress, onCallSignal })
             setFingerprint(fp);
             
             setStatus('connected');
+            clearInterval(pubKeyInterval); // Stop sending pubkey
+            
             // Send ACK to confirm key exchange
             conn.send(new Uint8Array([5])); // Type 5: ECDH ACK
           } catch (err) {
@@ -195,6 +212,7 @@ export function usePeer({ roomId, onMessage, onTransferProgress, onCallSignal })
         if (type === 5) { // ECDH ACK
           if (cryptoKeyRef.current) {
             setStatus('connected');
+            clearInterval(pubKeyInterval); // Stop sending pubkey
           }
           return;
         }
@@ -299,12 +317,16 @@ export function usePeer({ roomId, onMessage, onTransferProgress, onCallSignal })
 
     conn.on('close', () => {
       clearInterval(heartbeatInterval);
+      clearInterval(pubKeyInterval);
+      clearTimeout(connectionTimeout);
       handleDisconnectRef.current();
     });
 
     conn.on('error', (err) => {
       console.error('Connection error:', err);
       clearInterval(heartbeatInterval);
+      clearInterval(pubKeyInterval);
+      clearTimeout(connectionTimeout);
       handleDisconnectRef.current();
     });
   };

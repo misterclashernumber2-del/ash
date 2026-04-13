@@ -15,34 +15,39 @@ export async function deriveCallKey(ecdhSharedKey) {
 
 let encryptFrameCounter = 0;
 
-export function createEncryptTransform(callKey) {
+export function createEncryptTransform(callKey, isInitiator) {
   return new TransformStream({
     async transform(encodedFrame, controller) {
       const frameCounter = encryptFrameCounter++;
       
       const iv = new Uint8Array(12);
-      new DataView(iv.buffer).setBigUint64(0, BigInt(frameCounter));
+      // Byte 0: Role (1 for initiator, 0 for receiver) to prevent nonce reuse
+      iv[0] = isInitiator ? 1 : 0;
+      new DataView(iv.buffer).setBigUint64(4, BigInt(frameCounter));
       
       const data = new Uint8Array(encodedFrame.data);
-      
-      const HEADER_SIZE = 3;
+      const HEADER_SIZE = 3; // Leave RTP header unencrypted
       const header = data.slice(0, HEADER_SIZE);
       const payload = data.slice(HEADER_SIZE);
       
-      const encrypted = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv },
-        callKey,
-        payload
-      );
-      
-      const newData = new ArrayBuffer(HEADER_SIZE + 8 + encrypted.byteLength);
-      const view = new Uint8Array(newData);
-      view.set(header, 0);
-      new DataView(newData).setBigUint64(HEADER_SIZE, BigInt(frameCounter));
-      view.set(new Uint8Array(encrypted), HEADER_SIZE + 8);
-      
-      encodedFrame.data = newData;
-      controller.enqueue(encodedFrame);
+      try {
+        const encrypted = await crypto.subtle.encrypt(
+          { name: 'AES-GCM', iv },
+          callKey,
+          payload
+        );
+        
+        const newData = new ArrayBuffer(HEADER_SIZE + 12 + encrypted.byteLength);
+        const view = new Uint8Array(newData);
+        view.set(header, 0);
+        view.set(iv, HEADER_SIZE);
+        view.set(new Uint8Array(encrypted), HEADER_SIZE + 12);
+        
+        encodedFrame.data = newData;
+        controller.enqueue(encodedFrame);
+      } catch (err) {
+        // Drop frame on encryption error
+      }
     }
   });
 }
@@ -53,12 +58,11 @@ export function createDecryptTransform(callKey) {
       const HEADER_SIZE = 3;
       const data = new Uint8Array(encodedFrame.data);
       
-      const header = data.slice(0, HEADER_SIZE);
-      const frameCounter = new DataView(encodedFrame.data).getBigUint64(HEADER_SIZE);
-      const encrypted = data.slice(HEADER_SIZE + 8);
+      if (data.byteLength < HEADER_SIZE + 12) return; // Invalid frame
       
-      const iv = new Uint8Array(12);
-      new DataView(iv.buffer).setBigUint64(0, frameCounter);
+      const header = data.slice(0, HEADER_SIZE);
+      const iv = data.slice(HEADER_SIZE, HEADER_SIZE + 12);
+      const encrypted = data.slice(HEADER_SIZE + 12);
       
       try {
         const decrypted = await crypto.subtle.decrypt(

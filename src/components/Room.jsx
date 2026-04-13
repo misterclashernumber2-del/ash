@@ -151,9 +151,16 @@ export function Room({ roomId }) {
       } else if (status === 'disconnected' && prevStatusRef.current === 'connected') {
         addMessage({ type: 'system', text: t('peerLeft') || 'Peer left the room', id: Date.now().toString() }, false);
       }
+      
+      if (status === 'disconnected' || status === 'reconnecting') {
+        if (callState !== CALL_STATES.IDLE) {
+          endCall();
+        }
+      }
+      
       prevStatusRef.current = status;
     }
-  }, [status, addMessage, t]);
+  }, [status, addMessage, t, callState, endCall, CALL_STATES]);
 
   const handleSend = async (text) => {
     const sentMsg = await sendMessage(text);

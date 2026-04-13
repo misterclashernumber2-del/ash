@@ -13,27 +13,30 @@ const CALL_STATES = {
 };
 
 function optimizeSDP(sdp, quality = 'low') {
-  const configs = {
-    low: 'useinbandfec=1;usedtx=1;maxaveragebitrate=16000;minptime=60',
-    medium: 'useinbandfec=1;usedtx=1;maxaveragebitrate=32000;minptime=20',
-    high: 'useinbandfec=1;usedtx=1;maxaveragebitrate=64000;minptime=10',
-  };
-  
-  // Find Opus payload type
-  const match = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/);
-  if (!match) return sdp;
-  
-  const pt = match[1];
-  const fmtpRegex = new RegExp(`a=fmtp:${pt} (.*)`);
-  
-  if (sdp.match(fmtpRegex)) {
-    return sdp.replace(fmtpRegex, `a=fmtp:${pt} ${configs[quality]}`);
-  } else {
-    // If fmtp doesn't exist, append it after rtpmap
-    return sdp.replace(
-      new RegExp(`(a=rtpmap:${pt} opus\\/48000\\/2\\r\\n)`),
-      `$1a=fmtp:${pt} ${configs[quality]}\r\n`
-    );
+  try {
+    const configs = {
+      low: 'useinbandfec=1;usedtx=1;maxaveragebitrate=16000;minptime=60',
+      medium: 'useinbandfec=1;usedtx=1;maxaveragebitrate=32000;minptime=20',
+      high: 'useinbandfec=1;usedtx=1;maxaveragebitrate=64000;minptime=10',
+    };
+    
+    const match = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/);
+    if (!match) return sdp;
+    
+    const pt = match[1];
+    const fmtpRegex = new RegExp(`a=fmtp:${pt} (.*)`);
+    
+    if (sdp.match(fmtpRegex)) {
+      return sdp.replace(fmtpRegex, `a=fmtp:${pt} ${configs[quality]}`);
+    } else {
+      return sdp.replace(
+        new RegExp(`(a=rtpmap:${pt} opus\\/48000\\/2\\r\\n)`),
+        `$1a=fmtp:${pt} ${configs[quality]}\r\n`
+      );
+    }
+  } catch (e) {
+    console.warn('SDP optimization failed', e);
+    return sdp;
   }
 }
 
@@ -50,6 +53,9 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
   const callKeyRef = useRef(null);
   const qualityIntervalRef = useRef(null);
   const callTimeoutRef = useRef(null);
+  const iceQueueRef = useRef([]);
+  const isInitiatorRef = useRef(false);
+  
   const insertableStreamsSupported = typeof RTCRtpSender !== 'undefined' && 
     'createEncodedStreams' in RTCRtpSender.prototype;
 
@@ -61,11 +67,15 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
 
   const sendCallSignal = useCallback(async (payload) => {
     if (!connRef.current?.open || !cryptoKeyRef.current) return;
-    const encrypted = await encryptPayload(cryptoKeyRef.current, JSON.stringify({ __call: true, ...payload }));
-    const packet = new Uint8Array(1 + encrypted.byteLength);
-    packet[0] = 0;
-    packet.set(encrypted, 1);
-    connRef.current.send(packet);
+    try {
+      const encrypted = await encryptPayload(cryptoKeyRef.current, JSON.stringify({ __call: true, ...payload }));
+      const packet = new Uint8Array(1 + encrypted.byteLength);
+      packet[0] = 0; // Type 0: JSON message
+      packet.set(encrypted, 1);
+      connRef.current.send(packet);
+    } catch (err) {
+      console.error('Failed to send call signal', err);
+    }
   }, [connRef, cryptoKeyRef]);
 
   const cleanupCall = useCallback(() => {
@@ -80,16 +90,25 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
     peerConnectionRef.current = null;
     
     callKeyRef.current = null;
+    iceQueueRef.current = [];
+    isInitiatorRef.current = false;
+    
     setCallState(CALL_STATES.IDLE);
     setQuality('good');
+    setIsMuted(false);
+    setIsVideoOff(false);
   }, []);
 
   const createPeerConnection = useCallback(async (type, isInitiator) => {
     await initCallKey();
+    isInitiatorRef.current = isInitiator;
     
-    const pc = new RTCPeerConnection({
-      iceServers: ICE_SERVERS.iceServers,
-    });
+    const rtcConfig = { iceServers: ICE_SERVERS.iceServers };
+    if (insertableStreamsSupported) {
+      rtcConfig.encodedInsertableStreams = true; // CRITICAL for E2EE
+    }
+    
+    const pc = new RTCPeerConnection(rtcConfig);
     peerConnectionRef.current = pc;
 
     const constraints = {
@@ -108,22 +127,47 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
     };
     
     try {
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      const stream = await Promise.race([
+        navigator.mediaDevices.getUserMedia(constraints),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Media access timeout')), 15000))
+      ]);
       localStreamRef.current = stream;
       
       stream.getTracks().forEach(track => {
         const sender = pc.addTrack(track, stream);
         
+        // Prefer VP8/VP9 for video
+        if (track.kind === 'video' && typeof RTCRtpSender !== 'undefined' && RTCRtpSender.getCapabilities) {
+          try {
+            const transceivers = pc.getTransceivers();
+            const transceiver = transceivers.find(t => t.sender === sender);
+            if (transceiver && transceiver.setCodecPreferences) {
+              const codecs = RTCRtpSender.getCapabilities('video').codecs;
+              const vpCodecs = codecs.filter(c => c.mimeType.toLowerCase().includes('vp'));
+              transceiver.setCodecPreferences(vpCodecs);
+            }
+          } catch (e) {
+            console.warn('Failed to set codec preferences', e);
+          }
+        }
+        
+        // Apply Insertable Streams E2EE
         if (insertableStreamsSupported && callKeyRef.current) {
-          const { readable, writable } = sender.createEncodedStreams();
-          readable
-            .pipeThrough(createEncryptTransform(callKeyRef.current))
-            .pipeTo(writable);
+          try {
+            const { readable, writable } = sender.createEncodedStreams();
+            readable
+              .pipeThrough(createEncryptTransform(callKeyRef.current, isInitiatorRef.current))
+              .pipeTo(writable);
+          } catch (e) {
+            console.error('Insertable streams error', e);
+          }
         }
       });
     } catch (err) {
       console.error('Failed to get media devices', err);
+      sendCallSignal({ type: 'call-reject' });
       cleanupCall();
+      onSystemMessage?.('Microphone/Camera access denied or timeout');
       return null;
     }
 
@@ -133,10 +177,14 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
       if (insertableStreamsSupported && callKeyRef.current) {
         pc.getReceivers().forEach(receiver => {
           if (receiver.track.kind === 'audio' || receiver.track.kind === 'video') {
-            const { readable, writable } = receiver.createEncodedStreams();
-            readable
-              .pipeThrough(createDecryptTransform(callKeyRef.current))
-              .pipeTo(writable);
+            try {
+              const { readable, writable } = receiver.createEncodedStreams();
+              readable
+                .pipeThrough(createDecryptTransform(callKeyRef.current))
+                .pipeTo(writable);
+            } catch (e) {
+              console.error('Insertable streams decrypt error', e);
+            }
           }
         });
       }
@@ -149,7 +197,8 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
     };
 
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') {
+      if (pc.connectionState === 'connected' || pc.connectionState === 'completed') {
+        clearTimeout(callTimeoutRef.current);
         setCallState(CALL_STATES.CONNECTED);
         startQualityMonitor(pc);
       } else if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
@@ -162,10 +211,11 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
     };
 
     return pc;
-  }, [initCallKey, insertableStreamsSupported, cleanupCall, sendCallSignal]);
+  }, [initCallKey, insertableStreamsSupported, cleanupCall, sendCallSignal, onSystemMessage]);
 
   const startQualityMonitor = useCallback((pc) => {
     qualityIntervalRef.current = setInterval(async () => {
+      if (pc.connectionState !== 'connected') return;
       const stats = await pc.getStats();
       let packetLoss = 0, rtt = 0, jitter = 0;
       
@@ -217,11 +267,20 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
     clearTimeout(callTimeoutRef.current);
     setCallState(CALL_STATES.CONNECTING);
     
+    callTimeoutRef.current = setTimeout(() => {
+      if (peerConnectionRef.current?.connectionState !== 'connected' && peerConnectionRef.current?.connectionState !== 'completed') {
+        console.warn('Call connection timeout');
+        sendCallSignal({ type: 'call-cancel' });
+        cleanupCall();
+        onSystemMessage?.('Call connection failed');
+      }
+    }, 20000);
+    
     const pc = await createPeerConnection(incomingCallType, false);
     if (pc) {
       await sendCallSignal({ type: 'call-accept' });
     }
-  }, [createPeerConnection, sendCallSignal]);
+  }, [createPeerConnection, sendCallSignal, cleanupCall, onSystemMessage]);
 
   const rejectCall = useCallback(async () => {
     await sendCallSignal({ type: 'call-reject' });
@@ -253,6 +312,15 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
         clearTimeout(callTimeoutRef.current);
         setCallState(CALL_STATES.CONNECTING);
         
+        callTimeoutRef.current = setTimeout(() => {
+          if (peerConnectionRef.current?.connectionState !== 'connected' && peerConnectionRef.current?.connectionState !== 'completed') {
+            console.warn('Call connection timeout');
+            sendCallSignal({ type: 'call-cancel' });
+            cleanupCall();
+            onSystemMessage?.('Call connection failed');
+          }
+        }, 20000);
+        
         const pc = await createPeerConnection(callType, true);
         if (!pc) break;
         
@@ -267,6 +335,10 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
         const pc = peerConnectionRef.current;
         if (!pc) break;
         await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+        
+        iceQueueRef.current.forEach(c => pc.addIceCandidate(c).catch(() => {}));
+        iceQueueRef.current = [];
+
         const answer = await pc.createAnswer();
         answer.sdp = optimizeSDP(answer.sdp);
         await pc.setLocalDescription(answer);
@@ -276,14 +348,22 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
 
       case 'call-sdp-answer': {
         const pc = peerConnectionRef.current;
-        if (pc) await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+        if (pc) {
+          await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+          iceQueueRef.current.forEach(c => pc.addIceCandidate(c).catch(() => {}));
+          iceQueueRef.current = [];
+        }
         break;
       }
 
       case 'call-ice': {
         const pc = peerConnectionRef.current;
         if (pc && msg.candidate) {
-          await pc.addIceCandidate(msg.candidate).catch(() => {});
+          if (pc.remoteDescription && pc.remoteDescription.type) {
+            await pc.addIceCandidate(msg.candidate).catch(() => {});
+          } else {
+            iceQueueRef.current.push(msg.candidate);
+          }
         }
         break;
       }
