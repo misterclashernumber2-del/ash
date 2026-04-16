@@ -39,13 +39,13 @@ export function TestPage() {
           <div className="absolute top-0 left-0 bg-[#222] text-[#888] text-[10px] px-2 py-1 rounded-br z-20 font-bold tracking-wider">
             PEER 1
           </div>
-          <iframe src={`${url}?slot=1`} className="w-full h-full border-none" title="Peer 1" />
+          <iframe src={`${url}?slot=1`} className="w-full h-full border-none" title="Peer 1" allow="camera; microphone; display-capture; autoplay" />
         </div>
         <div className="flex-1 relative">
           <div className="absolute top-0 left-0 bg-[#222] text-[#888] text-[10px] px-2 py-1 rounded-br z-20 font-bold tracking-wider">
             PEER 2
           </div>
-          <iframe src={`${url}?slot=2`} className="w-full h-full border-none" title="Peer 2" />
+          <iframe src={`${url}?slot=2`} className="w-full h-full border-none" title="Peer 2" allow="camera; microphone; display-capture; autoplay" />
         </div>
       </div>
     </div>

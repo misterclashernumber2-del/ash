@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { nanoid } from 'nanoid';
 import { useLanguage } from '../lib/i18n';
-import { Copy, ArrowRight, Shield, LogIn, Settings2 } from 'lucide-react';
+import { Copy, ArrowRight, Shield, LogIn, Settings2, Upload, Users } from 'lucide-react';
 
 export function Home() {
   const navigate = useNavigate();
@@ -11,6 +11,7 @@ export function Home() {
   const [joinId, setJoinId] = useState('');
   const [copied, setCopied] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const fileInputRef = useRef(null);
   
   // Settings
   const [ttl, setTtl] = useState(300); // 5 minutes default
@@ -41,9 +42,74 @@ export function Home() {
 
   const handleJoin = (e) => {
     e.preventDefault();
-    if (joinId.trim()) {
-      navigate(`/r/${joinId.trim()}`);
+    let id = joinId.trim();
+    if (!id) return;
+    
+    try {
+      // Try to parse as URL
+      const url = new URL(id);
+      const pathParts = url.pathname.split('/').filter(Boolean);
+      const rIndex = pathParts.indexOf('r');
+      const gIndex = pathParts.indexOf('g');
+      if (rIndex !== -1 && rIndex + 1 < pathParts.length) {
+        id = pathParts[rIndex + 1];
+        navigate(`/r/${id}`);
+        return;
+      } else if (gIndex !== -1 && gIndex + 1 < pathParts.length) {
+        id = pathParts[gIndex + 1];
+        navigate(`/g/${id}`);
+        return;
+      } else {
+        id = pathParts[pathParts.length - 1];
+      }
+    } catch (err) {
+      // Not a valid URL, treat as raw ID or partial path
+      if (id.includes('/r/')) {
+        id = id.split('/r/').pop();
+        navigate(`/r/${id}`);
+        return;
+      } else if (id.includes('/g/')) {
+        id = id.split('/g/').pop();
+        navigate(`/g/${id}`);
+        return;
+      } else if (id.startsWith('http')) {
+        id = id.split('/').pop();
+      }
     }
+    
+    // Clean up any trailing slashes, query params, or hashes
+    if (id) {
+      id = id.replace(/\/$/, '').split('?')[0].split('#')[0];
+    }
+    
+    if (id) {
+      if (id.startsWith('g-')) {
+        navigate(`/g/${id}`);
+      } else {
+        navigate(`/r/${id}`);
+      }
+    }
+  };
+
+  const handleImport = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const importedMessages = JSON.parse(event.target.result);
+        // Create a new local-only room or navigate to a special viewer route
+        // For simplicity, we can navigate to a special route or pass state
+        // Let's navigate to a new room and pass the messages via state
+        const newRoomId = `imported-${nanoid(10)}`;
+        navigate(`/r/${newRoomId}`, { state: { importedMessages } });
+      } catch (err) {
+        console.error('Failed to parse JSON', err);
+        alert('Invalid JSON file');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
   };
 
   if (!baseId) return null;
@@ -167,6 +233,30 @@ export function Home() {
               <LogIn className="w-5 h-5" />
             </button>
           </form>
+
+          <div className="pt-2 flex gap-2">
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              className="flex-1 py-3 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-xl text-sm font-medium text-zinc-400 hover:text-zinc-200 transition-all flex items-center justify-center gap-2"
+            >
+              <Upload className="w-4 h-4" />
+              Import
+            </button>
+            <button
+              onClick={() => navigate(`/g/g-${nanoid(10)}`, { state: { isHost: true } })}
+              className="flex-1 py-3 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 rounded-xl text-sm font-medium text-zinc-400 hover:text-zinc-200 transition-all flex items-center justify-center gap-2"
+            >
+              <Users className="w-4 h-4" />
+              Group Chat
+            </button>
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              onChange={handleImport} 
+              accept=".json" 
+              className="hidden" 
+            />
+          </div>
         </div>
       </div>
 

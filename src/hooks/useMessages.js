@@ -73,6 +73,9 @@ export function useMessages(ttlSeconds = 300, maxMessages = 0) {
       url: rawMsg.url,
       mimeType: rawMsg.mimeType,
       name: rawMsg.name,
+      packId: rawMsg.packId,
+      stickerId: rawMsg.stickerId,
+      packName: rawMsg.packName,
       fromMe,
       timestamp: rawMsg.ts || now,
       expiresAt: (isSystem || ttlSeconds <= 0) ? Infinity : (rawMsg.ts || now) + expiryTimeMs,
@@ -104,6 +107,10 @@ export function useMessages(ttlSeconds = 300, maxMessages = 0) {
     return message;
   }, [ttlSeconds, maxMessages]);
 
+  const updateMessage = useCallback((id, updater) => {
+    setMessages(prev => prev.map(msg => msg.id === id ? updater(msg) : msg));
+  }, []);
+
   const clearExpired = useCallback(() => {
     const now = Date.now();
     setMessages((prev) => {
@@ -117,5 +124,5 @@ export function useMessages(ttlSeconds = 300, maxMessages = 0) {
     });
   }, []);
 
-  return { messages, addMessage, clearExpired };
+  return { messages, addMessage, updateMessage, clearExpired, setMessages };
 }

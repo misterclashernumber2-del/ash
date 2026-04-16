@@ -27,7 +27,7 @@ export async function deriveSharedSecret(privateKey, publicKeyBytes) {
     { name: 'ECDH', public: publicKey },
     privateKey,
     { name: 'AES-GCM', length: 256 },
-    false,
+    true,
     ['encrypt', 'decrypt']
   );
 }

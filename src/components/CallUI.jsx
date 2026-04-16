@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 
-export function CallUI({ callState, callType, isMuted, isVideoOff, quality,
+export function CallUI({ callState, callType, isMuted, isVideoOff, quality, callStats,
                          localStream, remoteStream, insertableStreamsSupported,
                          onAccept, onReject, onEnd, onMute, onVideoToggle,
                          CALL_STATES, fingerprint }) {
@@ -83,13 +83,23 @@ export function CallUI({ callState, callType, isMuted, isVideoOff, quality,
               🎙
             </div>
             <p className="text-zinc-300 font-medium">Voice call</p>
+            <audio ref={remoteVideoRef} autoPlay playsInline className="hidden" />
           </div>
         )}
 
         {/* Статус качества */}
-        <div className={`text-center text-xs py-1 ${qualityColors[quality]}`}>
-          {qualityIcons[quality]} {quality}
-          {!insertableStreamsSupported && ' · DTLS only'}
+        <div className={`text-center text-xs py-2 flex flex-col items-center gap-1 ${qualityColors[quality]}`}>
+          <div className="flex items-center gap-1.5 font-medium">
+            {qualityIcons[quality]} <span className="uppercase tracking-wider">{quality}</span>
+            {!insertableStreamsSupported && <span className="text-zinc-500 ml-1">· DTLS only</span>}
+          </div>
+          {callStats && (
+            <div className="flex items-center gap-3 text-[10px] text-zinc-500 font-mono opacity-80">
+              <span title="Packet Loss">PL: {(callStats.packetLoss * 100).toFixed(1)}%</span>
+              <span title="Latency (RTT)">RTT: {Math.round(callStats.rtt * 1000)}ms</span>
+              <span title="Jitter">JIT: {Math.round(callStats.jitter * 1000)}ms</span>
+            </div>
+          )}
         </div>
 
         {/* E2EE индикатор */}

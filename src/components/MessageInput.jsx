@@ -1,6 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useLanguage } from '../lib/i18n';
 import { Send, Paperclip, X, AlertCircle } from 'lucide-react';
+import { VoiceRecorder } from './VoiceRecorder';
+import { StickerPicker } from './StickerPicker';
 
 export function MessageInput({ onSend, onSendFile, disabled, draggedFile, onClearDraggedFile, onTyping }) {
   const { t } = useLanguage();
@@ -11,6 +13,7 @@ export function MessageInput({ onSend, onSendFile, disabled, draggedFile, onClea
   const [previewUrl, setPreviewUrl] = useState(null);
   const [qualityMode, setQualityMode] = useState('balance');
   const [error, setError] = useState('');
+  const [isRecordingVoice, setIsRecordingVoice] = useState(false);
   const typingTimeoutRef = useRef(null);
   const isTypingRef = useRef(false);
   const MAX_LENGTH = 2000;
@@ -198,40 +201,65 @@ export function MessageInput({ onSend, onSendFile, disabled, draggedFile, onClea
         </div>
       )}
       <form onSubmit={handleSubmit} className="relative flex items-end gap-2 bg-zinc-900 border border-zinc-800 rounded-3xl p-1.5 focus-within:border-zinc-600 focus-within:ring-1 focus-within:ring-zinc-600 transition-all">
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={disabled}
-          className="w-11 h-11 text-zinc-400 hover:text-zinc-200 rounded-full flex items-center justify-center transition-all disabled:opacity-50 shrink-0"
-          title={t('attachFile')}
-        >
-          <Paperclip className="w-5 h-5" />
-        </button>
-        <input 
-          type="file" 
-          ref={fileInputRef} 
-          onChange={handleFileChange} 
-          accept="image/*,video/*" 
-          className="hidden" 
-        />
-        <textarea
-          ref={textareaRef}
-          value={text}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          disabled={disabled}
-          placeholder={disabled ? t('waitingConnection') : t('messagePlaceholder')}
-          className="flex-1 bg-transparent px-2 py-2.5 text-[15px] focus:outline-none text-zinc-100 resize-none overflow-y-auto min-h-[44px] max-h-[150px] disabled:opacity-50 placeholder:text-zinc-500"
-          rows={1}
-        />
-        <button
-          type="submit"
-          disabled={!text.trim() || disabled}
-          className="w-11 h-11 bg-zinc-100 hover:bg-white text-zinc-950 rounded-full flex items-center justify-center transition-all disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
-        >
-          <Send className="w-5 h-5 ml-0.5" />
-        </button>
+        {isRecordingVoice ? (
+          <VoiceRecorder 
+            onSend={(file, duration) => {
+              onSendFile(file, 'original', '', 'voice', duration);
+              setIsRecordingVoice(false);
+            }}
+            onCancel={() => setIsRecordingVoice(false)}
+          />
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={disabled}
+              className="w-11 h-11 text-zinc-400 hover:text-zinc-200 rounded-full flex items-center justify-center transition-all disabled:opacity-50 shrink-0"
+              title={t('attachFile')}
+            >
+              <Paperclip className="w-5 h-5" />
+            </button>
+            <StickerPicker 
+              disabled={disabled} 
+              onSelect={(sticker) => onSend(sticker, 'sticker')} 
+            />
+            <input 
+              type="file" 
+              ref={fileInputRef} 
+              onChange={handleFileChange} 
+              accept="image/*,video/*" 
+              className="hidden" 
+            />
+            <textarea
+              ref={textareaRef}
+              value={text}
+              onChange={handleChange}
+              onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
+              disabled={disabled}
+              placeholder={disabled ? t('waitingConnection') : t('messagePlaceholder')}
+              className="flex-1 bg-transparent px-2 py-2.5 text-[15px] focus:outline-none text-zinc-100 resize-none overflow-y-auto min-h-[44px] max-h-[150px] disabled:opacity-50 placeholder:text-zinc-500"
+              rows={1}
+            />
+            {text.trim() ? (
+              <button
+                type="submit"
+                disabled={disabled}
+                className="w-11 h-11 bg-zinc-100 hover:bg-white text-zinc-950 rounded-full flex items-center justify-center transition-all disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
+              >
+                <Send className="w-5 h-5 ml-0.5" />
+              </button>
+            ) : (
+              <div className="w-11 h-11 flex items-center justify-center shrink-0" onPointerDown={() => setIsRecordingVoice(true)}>
+                <VoiceRecorder 
+                  onSend={() => {}} 
+                  onCancel={() => setIsRecordingVoice(false)} 
+                />
+              </div>
+            )}
+          </>
+        )}
       </form>
       {showCount && (
         <div className={`text-xs text-right pr-4 ${text.length >= MAX_LENGTH ? 'text-red-400' : 'text-zinc-500'}`}>

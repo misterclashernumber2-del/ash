@@ -20,8 +20,8 @@ export function createEncryptTransform(callKey, isInitiator) {
       const frameCounter = encryptFrameCounter++;
       
       const iv = new Uint8Array(12);
-      // Byte 0: Role (1 for initiator, 0 for receiver) to prevent nonce reuse
-      iv[0] = isInitiator ? 1 : 0;
+      // Bytes 0-3: Role (initiator gets high bit set) to prevent nonce reuse
+      new DataView(iv.buffer).setUint32(0, isInitiator ? 0x80000000 : 0);
       new DataView(iv.buffer).setBigUint64(4, BigInt(frameCounter));
       
       const data = new Uint8Array(encodedFrame.data);

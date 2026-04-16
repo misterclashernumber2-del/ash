@@ -54,6 +54,10 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
   const [isMuted, setIsMuted] = useState(false);
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [quality, setQuality] = useState('good');
+  const [callStats, setCallStats] = useState({ packetLoss: 0, rtt: 0, jitter: 0 });
+  
+  const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
   
   const localStreamRef = useRef(null);
   const remoteStreamRef = useRef(null);
@@ -70,7 +74,11 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
 
   const initCallKey = useCallback(async () => {
     if (cryptoKeyRef.current && !callKeyRef.current) {
-      callKeyRef.current = await deriveCallKey(cryptoKeyRef.current);
+      try {
+        callKeyRef.current = await deriveCallKey(cryptoKeyRef.current);
+      } catch (e) {
+        console.error('Failed to derive call key', e);
+      }
     }
   }, [cryptoKeyRef]);
 
@@ -94,6 +102,8 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     localStreamRef.current = null;
     remoteStreamRef.current = null;
+    setLocalStream(null);
+    setRemoteStream(null);
     
     peerConnectionRef.current?.close();
     peerConnectionRef.current = null;
@@ -143,6 +153,7 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
         new Promise((_, reject) => setTimeout(() => reject(new Error('Media access timeout')), 15000))
       ]);
       localStreamRef.current = stream;
+      setLocalStream(stream);
       
       stream.getTracks().forEach(track => {
         const sender = pc.addTrack(track, stream);
@@ -193,22 +204,22 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
       return null;
     }
 
-    pc.ontrack = ({ streams: [remoteStream] }) => {
+    pc.ontrack = (event) => {
+      const { streams: [remoteStream], receiver, track } = event;
       remoteStreamRef.current = remoteStream;
+      setRemoteStream(remoteStream);
       
       if (insertableStreamsSupported && callKeyRef.current) {
-        pc.getReceivers().forEach(receiver => {
-          if (receiver.track.kind === 'audio' || receiver.track.kind === 'video') {
-            try {
-              const { readable, writable } = receiver.createEncodedStreams();
-              readable
-                .pipeThrough(createDecryptTransform(callKeyRef.current))
-                .pipeTo(writable);
-            } catch (e) {
-              console.error('Insertable streams decrypt error', e);
-            }
+        if (track.kind === 'audio' || track.kind === 'video') {
+          try {
+            const { readable, writable } = receiver.createEncodedStreams();
+            readable
+              .pipeThrough(createDecryptTransform(callKeyRef.current))
+              .pipeTo(writable);
+          } catch (e) {
+            console.error('Insertable streams decrypt error', e);
           }
-        });
+        }
       }
     };
 
@@ -268,6 +279,7 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
       else newQuality = 'good';
       
       setQuality(newQuality);
+      setCallStats({ packetLoss, rtt, jitter });
       
       const sender = pc.getSenders().find(s => s.track?.kind === 'audio');
       if (sender) {
@@ -283,16 +295,25 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
 
   const startCall = useCallback(async (type = 'audio') => {
     if (callStateRef.current !== CALL_STATES.IDLE) return;
+    if (!cryptoKeyRef.current) {
+      toast.error('Secure connection not fully established yet');
+      return;
+    }
     updateCallState(CALL_STATES.CALLING);
     setCallType(type);
     
-    await sendCallSignal({ type: 'call-offer', callType: type });
-    
-    callTimeoutRef.current = setTimeout(() => {
-      sendCallSignal({ type: 'call-cancel' });
+    try {
+      await sendCallSignal({ type: 'call-offer', callType: type });
+      
+      callTimeoutRef.current = setTimeout(() => {
+        sendCallSignal({ type: 'call-cancel' });
+        cleanupCall();
+        onSystemMessage?.('No answer');
+      }, 30000);
+    } catch (e) {
+      console.error('Failed to start call', e);
       cleanupCall();
-      onSystemMessage?.('No answer');
-    }, 30000);
+    }
   }, [sendCallSignal, cleanupCall, onSystemMessage, updateCallState]);
 
   const acceptCall = useCallback(async (incomingCallType) => {
@@ -308,9 +329,14 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
       }
     }, 20000);
     
-    const pc = await createPeerConnection(incomingCallType, false);
-    if (pc) {
-      await sendCallSignal({ type: 'call-accept' });
+    try {
+      const pc = await createPeerConnection(incomingCallType, false);
+      if (pc) {
+        await sendCallSignal({ type: 'call-accept' });
+      }
+    } catch (e) {
+      console.error('Failed to accept call', e);
+      cleanupCall();
     }
   }, [createPeerConnection, sendCallSignal, cleanupCall, onSystemMessage, updateCallState]);
 
@@ -353,6 +379,7 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
         break;
 
       case 'call-accept': {
+        if (callStateRef.current !== CALL_STATES.CALLING) break;
         clearTimeout(callTimeoutRef.current);
         updateCallState(CALL_STATES.CONNECTING);
         
@@ -365,37 +392,50 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
           }
         }, 20000);
         
-        const pc = await createPeerConnection(callType, true);
-        if (!pc) break;
-        
-        const offer = await pc.createOffer();
-        offer.sdp = optimizeSDP(offer.sdp);
-        await pc.setLocalDescription(offer);
-        await sendCallSignal({ type: 'call-sdp-offer', sdp: offer.sdp });
+        try {
+          const pc = await createPeerConnection(callType, true);
+          if (!pc) break;
+          
+          const offer = await pc.createOffer();
+          offer.sdp = optimizeSDP(offer.sdp);
+          await pc.setLocalDescription(offer);
+          await sendCallSignal({ type: 'call-sdp-offer', sdp: offer.sdp });
+        } catch (e) {
+          console.error('Call accept error', e);
+          cleanupCall();
+        }
         break;
       }
 
       case 'call-sdp-offer': {
-        const pc = peerConnectionRef.current;
-        if (!pc || typeof msg.sdp !== 'string' || !msg.sdp.includes('v=0')) break;
-        await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
-        
-        iceQueueRef.current.forEach(c => pc.addIceCandidate(c).catch(() => {}));
-        iceQueueRef.current = [];
+        try {
+          const pc = peerConnectionRef.current;
+          if (!pc || typeof msg.sdp !== 'string' || !msg.sdp.includes('v=0')) break;
+          await pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+          
+          iceQueueRef.current.forEach(c => pc.addIceCandidate(c).catch(() => {}));
+          iceQueueRef.current = [];
 
-        const answer = await pc.createAnswer();
-        answer.sdp = optimizeSDP(answer.sdp);
-        await pc.setLocalDescription(answer);
-        await sendCallSignal({ type: 'call-sdp-answer', sdp: answer.sdp });
+          const answer = await pc.createAnswer();
+          answer.sdp = optimizeSDP(answer.sdp);
+          await pc.setLocalDescription(answer);
+          await sendCallSignal({ type: 'call-sdp-answer', sdp: answer.sdp });
+        } catch (e) {
+          console.error('SDP offer error', e);
+        }
         break;
       }
 
       case 'call-sdp-answer': {
-        const pc = peerConnectionRef.current;
-        if (pc && typeof msg.sdp === 'string' && msg.sdp.includes('v=0')) {
-          await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
-          iceQueueRef.current.forEach(c => pc.addIceCandidate(c).catch(() => {}));
-          iceQueueRef.current = [];
+        try {
+          const pc = peerConnectionRef.current;
+          if (pc && typeof msg.sdp === 'string' && msg.sdp.includes('v=0')) {
+            await pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+            iceQueueRef.current.forEach(c => pc.addIceCandidate(c).catch(() => {}));
+            iceQueueRef.current = [];
+          }
+        } catch (e) {
+          console.error('SDP answer error', e);
         }
         break;
       }
@@ -449,9 +489,9 @@ export function useCall({ connRef, cryptoKeyRef, onSystemMessage }) {
   }, [cleanupCall]);
 
   return {
-    callState, callType, isMuted, isVideoOff, quality,
-    localStream: localStreamRef.current,
-    remoteStream: remoteStreamRef.current,
+    callState, callType, isMuted, isVideoOff, quality, callStats,
+    localStream,
+    remoteStream,
     insertableStreamsSupported,
     startCall, acceptCall, rejectCall, endCall,
     toggleMute, toggleVideo,
